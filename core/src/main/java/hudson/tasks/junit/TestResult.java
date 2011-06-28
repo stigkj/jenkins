@@ -27,9 +27,11 @@ import hudson.AbortException;
 import hudson.Util;
 import hudson.model.AbstractBuild;
 import hudson.model.Run;
+import hudson.tasks.test.DefaultTestResultParserImpl;
 import hudson.tasks.test.MetaTabulatedResult;
 import hudson.tasks.test.TestObject;
 import hudson.tasks.test.AbstractTestResultAction;
+import hudson.tasks.test.TestResultParser;
 import hudson.util.IOException2;
 import org.apache.tools.ant.DirectoryScanner;
 import org.dom4j.DocumentException;
@@ -561,6 +563,5 @@ public final class TestResult extends MetaTabulatedResult {
     }
 
     private static final long serialVersionUID = 1L;
-    private static final boolean checkTimestamps = true; // TODO: change to System.getProperty
-
+    private static final boolean checkTimestamps = false;
 }
