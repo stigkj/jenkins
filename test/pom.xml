@@ -24,15 +24,16 @@ THE SOFTWARE.
 -->
 
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
   <parent>
     <artifactId>pom</artifactId>
     <groupId>org.jenkins-ci.main</groupId>
-    <version>1.417-SNAPSHOT</version>
+    <version>1.449-SNAPSHOT</version>
   </parent>
-  <modelVersion>4.0.0</modelVersion>
   <groupId>org.jenkins-ci.main</groupId>
   <artifactId>jenkins-test-harness</artifactId>
-  <packaging>stapler-jar</packaging>
+
   <name>Test harness for Jenkins and plugins</name>
   <description>
     Unit test harness (src/main) and Unit tests for Jenkins core (src/test)
@@ -43,8 +44,117 @@ THE SOFTWARE.
     <mavenDebug>false</mavenDebug>
   </properties>
 
+  <dependencies>
+    <dependency>
+      <!--
+        put hudson.war in the classpath. we can't pull in the war artifact directly
+        because Maven excludes all wars from classpath automatically. so we need a jar artifact.
+      -->
+      <groupId>${project.groupId}</groupId>
+      <artifactId>jenkins-war</artifactId>
+      <version>${project.version}</version>
+      <classifier>war-for-test</classifier>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>maven-plugin</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jenkins-ci.plugins</groupId>
+      <artifactId>ant</artifactId>
+      <version>1.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jenkins-ci.plugins</groupId>
+      <artifactId>subversion</artifactId>
+      <version>1.25</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mortbay.jetty</groupId>
+      <artifactId>jetty</artifactId>
+      <version>6.1.26</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jvnet.hudson</groupId>
+      <artifactId>test-annotations</artifactId>
+      <version>1.0</version>
+      <scope>compile</scope>
+      <!-- in this module we need this as a compile scope, whereas in the parent it's test -->
+    </dependency>
+    <dependency>
+      <groupId>org.jvnet.mock-javamail</groupId>
+      <artifactId>mock-javamail</artifactId>
+      <version>1.7</version>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit-dep</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.hamcrest</groupId>
+      <artifactId>hamcrest-library</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.jenkins-ci</groupId>
+      <artifactId>htmlunit</artifactId>
+      <version>2.6-jenkins-6</version>
+      <exclusions>
+        <exclusion>
+          <!--  hides JDK DOM classes in Eclipse -->
+          <groupId>xml-apis</groupId>
+          <artifactId>xml-apis</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency><!-- we exclude this transient dependency from htmlunit, which we actually need in the test -->
+      <groupId>xalan</groupId>
+      <artifactId>xalan</artifactId>
+      <version>2.7.1</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.jvnet.hudson</groupId>
+      <artifactId>embedded-rhino-debugger</artifactId>
+      <version>1.2</version>
+    </dependency>
+    <dependency>
+      <!-- for testing JNLP launch. -->
+      <groupId>org.jvnet.hudson</groupId>
+      <artifactId>netx</artifactId>
+      <version>0.5-hudson-2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.easymock</groupId>
+      <artifactId>easymock</artifactId>
+      <version>2.4</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-test-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${project.basedir}/src/test/junit4</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.kohsuke.stapler</groupId>
         <artifactId>maven-stapler-plugin</artifactId>
@@ -88,95 +198,16 @@ THE SOFTWARE.
             <artifactId>ant</artifactId>
             <version>1.8.0</version>
           </dependency>
+          <!-- Usually a dependency of ant, but some people seem to have an incomplete ant POM. See JENKINS-11416 -->
+          <dependency>
+            <groupId>org.apache.ant</groupId>
+            <artifactId>ant-launcher</artifactId>
+            <version>1.8.0</version>
+          </dependency>
         </dependencies>
       </plugin>
     </plugins>
   </build>
-
-  <dependencies>
-    <dependency>
-      <!--
-        put hudson.war in the classpath. we can't pull in the war artifact directly
-        because Maven excludes all wars from classpath automatically. so we need a jar artifact.
-      -->
-      <groupId>${project.groupId}</groupId>
-      <artifactId>jenkins-war</artifactId>
-      <version>${project.version}</version>
-      <classifier>war-for-test</classifier>
-    </dependency>
-    <dependency>
-      <groupId>${project.groupId}</groupId>
-      <artifactId>maven-plugin</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.jenkins-ci.plugins</groupId>
-      <artifactId>subversion</artifactId>
-      <version>1.25</version>
-    </dependency>
-    <dependency>
-      <groupId>org.mortbay.jetty</groupId>
-      <artifactId>jetty</artifactId>
-      <version>6.1.26</version>
-    </dependency>
-    <dependency>
-      <groupId>org.jvnet.hudson</groupId>
-      <artifactId>test-annotations</artifactId>
-      <version>1.0</version>
-      <scope>compile</scope>
-      <!-- in this module we need this as a compile scope, whereas in the parent it's test -->
-    </dependency>
-    <dependency>
-      <groupId>org.jvnet.mock-javamail</groupId>
-      <artifactId>mock-javamail</artifactId>
-      <version>1.7</version>
-    </dependency>
-    <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
-      <version>4.8.2</version>
-    </dependency>
-    <!--dependency>
-      <groupId>org.openqa.selenium.client-drivers</groupId>
-      <artifactId>selenium-java-client-driver</artifactId>
-      <version>1.0-beta-1</version>
-    </dependency-->
-    <dependency>
-      <groupId>org.jenkins-ci</groupId>
-      <artifactId>htmlunit</artifactId>
-      <version>2.6-jenkins-4</version>
-      <exclusions>
-        <exclusion>
-          <!--  hides JDK DOM classes in Eclipse -->
-          <groupId>xml-apis</groupId>
-          <artifactId>xml-apis</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>org.jvnet.hudson</groupId>
-      <artifactId>embedded-rhino-debugger</artifactId>
-      <version>1.2</version>
-    </dependency>
-    <dependency>
-      <!-- for testing JNLP launch. -->
-      <groupId>org.jvnet.hudson</groupId>
-      <artifactId>netx</artifactId>
-      <version>0.5-hudson-2</version>
-    </dependency>
-    <dependency>
-      <groupId>org.easymock</groupId>
-      <artifactId>easymock</artifactId>
-      <version>2.4</version>
-    </dependency>
-    <dependency>
-      <groupId>org.mockito</groupId>
-      <artifactId>mockito-core</artifactId>
-      <version>1.8.5</version>
-      <scope>test</scope>
-    </dependency>
-  </dependencies>
 
   <profiles>
 
@@ -190,6 +221,17 @@ THE SOFTWARE.
       <build>
         <plugins>
           <plugin>
+            <!-- JUnit4 test is failed with maven-junit-plugin-->
+            <artifactId>maven-surefire-plugin</artifactId>
+            <!-- version specified in grandparent pom -->
+            <configuration>
+              <skip>false</skip>
+              <includes>
+                <include>**/UseRecipesWithJenkinsRuleTest.java</include>
+              </includes>
+            </configuration>
+          </plugin>
+          <plugin>
             <!-- see http://maven-junit-plugin.kenai.com/ for more info -->
             <groupId>org.kohsuke</groupId>
             <artifactId>maven-junit-plugin</artifactId>
@@ -202,7 +244,7 @@ THE SOFTWARE.
                 <configuration>
                   <fork>true</fork>
                   <concurrency>${concurrency}</concurrency>
-                  <argLine>-Dfile.encoding=UTF-8</argLine>
+                  <argLine>-Dfile.encoding=UTF-8 -XX:MaxPermSize=128m</argLine>
                   <timeout>300</timeout>
                   <systemProperties>
                     <property>
@@ -222,7 +264,14 @@ THE SOFTWARE.
                       <name>buildDirectory</name>
                       <value>${project.build.directory}</value>
                     </property>
+                    <property>
+                      <name>java.awt.headless</name>
+                      <value>true</value>
+                    </property>
                   </systemProperties>
+                  <excludes>
+                    <exclude>org/jvnet/hudson/main/UseRecipesWithJenkinsRuleTest.class</exclude>
+                  </excludes>
                 </configuration>
               </execution>
             </executions>

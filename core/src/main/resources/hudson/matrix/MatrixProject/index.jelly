@@ -27,7 +27,10 @@ THE SOFTWARE.
   <l:layout title="${it.name}">
     <st:include page="sidepanel.jelly" />
     <l:main-panel>
-      <h1>${%Project} ${it.name}</h1>
+      <h1>${%Project} ${it.displayName}</h1>
+      <j:if test="${it.name!=it.displayName}">
+        ${%Project name}: ${it.name}
+      </j:if>
       <t:editableDescription permission="${it.CONFIGURE}"/>
 
       <j:choose>
@@ -54,8 +57,19 @@ THE SOFTWARE.
 
       <st:include page="ajaxMatrix.jelly" />
 
-      <p:projectActionFloatingBox/>
-      <st:include page="jobpropertysummaries.jelly" />
+    <p:projectActionFloatingBox/>
+ 
+    <table style="margin-top: 1em; margin-left:1em;">
+      <j:set var="atr" value="${it.lastCompletedBuild.aggregatedTestResultAction}"/>
+      <j:if test="${atr!=null}">
+        <t:summary icon="clipboard.png">
+          <a href="lastCompletedBuild/testReport/">${%Latest Test Result}</a>
+          <st:nbsp/>
+          <t:test-result it="${atr}" />
+        </t:summary>
+      </j:if>
+    </table>
+     <st:include page="jobpropertysummaries.jelly" />
       <p:upstream-downstream />
     </l:main-panel>
   </l:layout>

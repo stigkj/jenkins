@@ -2,7 +2,8 @@
  * The MIT License
  * 
  * Copyright (c) 2004-2010, Sun Microsystems, Inc., Kohsuke Kawaguchi,
- * Yahoo! Inc., Stephen Connolly, Tom Huybrechts, Alan Harder, Romain Seguy
+ * Yahoo! Inc., Stephen Connolly, Tom Huybrechts, Alan Harder, Manufacture
+ * Francaise des Pneumatiques Michelin, Romain Seguy
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +47,7 @@ import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrappers;
 import hudson.tasks.Builder;
 import hudson.tasks.Publisher;
+import hudson.tasks.UserAvatarResolver;
 import hudson.util.Area;
 import hudson.util.Iterators;
 import hudson.scm.SCM;
@@ -54,6 +56,7 @@ import hudson.util.Secret;
 import hudson.views.MyViewsTabBar;
 import hudson.views.ViewsTabBar;
 import hudson.widgets.RenderOnDemandClosure;
+import jenkins.model.GlobalConfiguration;
 import jenkins.model.Jenkins;
 import org.acegisecurity.providers.anonymous.AnonymousAuthenticationToken;
 import org.apache.commons.jelly.JellyContext;
@@ -62,7 +65,7 @@ import org.apache.commons.jelly.Script;
 import org.apache.commons.jelly.XMLOutput;
 import org.apache.commons.jexl.parser.ASTSizeFunction;
 import org.apache.commons.jexl.util.Introspector;
-import org.jvnet.animal_sniffer.IgnoreJRERequirement;
+import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 import org.jvnet.tiger_types.Types;
 import org.kohsuke.stapler.Ancestor;
 import org.kohsuke.stapler.Stapler;
@@ -70,6 +73,7 @@ import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
 import org.kohsuke.stapler.jelly.InternationalizedStringExpression.RawHtmlArgument;
 
+import javax.management.modelmbean.DescriptorSupport;
 import javax.servlet.ServletException;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -108,6 +112,7 @@ import java.util.logging.LogManager;
 import java.util.logging.LogRecord;
 import java.util.logging.SimpleFormatter;
 import java.util.regex.Pattern;
+import org.apache.commons.lang.StringUtils;
 
 /**
  * Utility functions used in views.
@@ -642,11 +647,25 @@ public class Functions {
         StringBuilder buf = new StringBuilder();
         buf.append(req.getScheme()).append("://");
         buf.append(req.getServerName());
-        if(req.getLocalPort()!=80)
+        if(! (req.getScheme().equals("http") && req.getLocalPort()==80 || req.getScheme().equals("https") && req.getLocalPort()==443))
             buf.append(':').append(req.getLocalPort());
         buf.append(req.getContextPath()).append('/');
         return buf.toString();
     }
+
+    /**
+     * Returns the link to be displayed in the footer of the UI.
+     */
+    public static String getFooterURL() {
+        if(footerURL == null) {
+            footerURL = System.getProperty("hudson.footerURL");
+            if(StringUtils.isBlank(footerURL)) {
+                footerURL = "http://jenkins-ci.org/";
+            }
+        }
+        return footerURL;
+    }
+    private static String footerURL = null;
 
     public static List<JobPropertyDescriptor> getJobPropertyDescriptors(Class<? extends Job> clazz) {
         return JobPropertyDescriptor.getPropertyDescriptors(clazz);
@@ -714,21 +733,58 @@ public class Functions {
     /**
      * Gets all the descriptors sorted by their inheritance tree of {@link Describable}
      * so that descriptors of similar types come nearby.
+     *
+     * <p>
+     * We sort them by {@link Extension#ordinal()} but only for {@link GlobalConfiguration}s,
+     * as the value is normally used to compare similar kinds of extensions, and we needed
+     * {@link GlobalConfiguration}s to be able to position themselves in a layer above.
+     * This however creates some asymmetry between regular {@link Descriptor}s and {@link GlobalConfiguration}s.
+     * Perhaps it is better to introduce another annotation element? But then,
+     * extensions shouldn't normally concern themselves about ordering too much, and the only reason
+     * we needed this for {@link GlobalConfiguration}s are for backward compatibility.
      */
     public static Collection<Descriptor> getSortedDescriptorsForGlobalConfig() {
-        Map<String,Descriptor> r = new TreeMap<String, Descriptor>();
-        for (Descriptor<?> d : Jenkins.getInstance().getExtensionList(Descriptor.class)) {
-            if (d.getGlobalConfigPage()==null)  continue;
-            r.put(buildSuperclassHierarchy(d.clazz, new StringBuilder()).toString(),d);
+        class Tag implements Comparable<Tag> {
+            double ordinal;
+            String hierarchy;
+            Descriptor d;
+
+            Tag(double ordinal, Descriptor d) {
+                this.ordinal = ordinal;
+                this.d = d;
+                this.hierarchy = buildSuperclassHierarchy(d.clazz, new StringBuilder()).toString();
+            }
+
+            private StringBuilder buildSuperclassHierarchy(Class c, StringBuilder buf) {
+                Class sc = c.getSuperclass();
+                if (sc!=null)   buildSuperclassHierarchy(sc,buf).append(':');
+                return buf.append(c.getName());
+            }
+
+            public int compareTo(Tag that) {
+                int r = Double.compare(this.ordinal, that.ordinal);
+                if (r!=0)   return -r; // descending for ordinal
+                return this.hierarchy.compareTo(that.hierarchy);
+            }
         }
-        return r.values();
+
+        ExtensionList<Descriptor> exts = Jenkins.getInstance().getExtensionList(Descriptor.class);
+        List<Tag> r = new ArrayList<Tag>(exts.size());
+
+        for (ExtensionComponent<Descriptor> c : exts.getComponents()) {
+            Descriptor d = c.getInstance();
+            if (d.getGlobalConfigPage()==null)  continue;
+
+            r.add(new Tag(d instanceof GlobalConfiguration ? c.ordinal() : 0, d));
+        }
+        Collections.sort(r);
+
+        List<Descriptor> answer = new ArrayList<Descriptor>(r.size());
+        for (Tag d : r) answer.add(d.d);
+
+        return DescriptorVisibilityFilter.apply(Jenkins.getInstance(),answer);
     }
 
-    private static StringBuilder buildSuperclassHierarchy(Class c, StringBuilder buf) {
-        Class sc = c.getSuperclass();
-        if (sc!=null)   buildSuperclassHierarchy(sc,buf).append(':');
-        return buf.append(c.getName());
-    }
 
     /**
      * Computes the path to the icon of the given action
@@ -1113,7 +1169,7 @@ public class Functions {
     public static String getActionUrl(String itUrl,Action action) {
         String urlName = action.getUrlName();
         if(urlName==null)   return null;    // to avoid NPE and fail to render the whole page
-        if(SCHEME.matcher(urlName).matches())
+        if(SCHEME.matcher(urlName).find())
             return urlName; // absolute URL
         if(urlName.startsWith("/"))
             return Stapler.getCurrentRequest().getContextPath()+urlName;
@@ -1307,7 +1363,7 @@ public class Functions {
         return DescriptorVisibilityFilter.apply(context,descriptors);
     }
     
-    private static final Pattern SCHEME = Pattern.compile("[a-z]+://.+");
+    private static final Pattern SCHEME = Pattern.compile("^([a-zA-Z][a-zA-Z0-9+.-]*):");
 
     /**
      * Returns true if we are running unit tests.
@@ -1321,14 +1377,29 @@ public class Functions {
      * {@code false} otherwise.
      *
      * <p>When the {@link Run#ARTIFACTS} permission is not turned on using the
-     * {@code hudson.security.ArtifactsPermission}, this permission must not be
-     * considered to be set to {@code false} for every user. It must rather be
-     * like if the permission doesn't exist at all (which means that every user
-     * has to have an access to the artifacts but the permission can't be
-     * configured in the security screen). Got it?</p>
+     * {@code hudson.security.ArtifactsPermission} system property, this
+     * permission must not be considered to be set to {@code false} for every
+     * user. It must rather be like if the permission doesn't exist at all
+     * (which means that every user has to have an access to the artifacts but
+     * the permission can't be configured in the security screen). Got it?</p>
      */
     public static boolean isArtifactsPermissionEnabled() {
         return Boolean.getBoolean("hudson.security.ArtifactsPermission");
+    }
+
+    /**
+     * Returns {@code true} if the {@link Item#WIPEOUT} permission is enabled,
+     * {@code false} otherwise.
+     *
+     * <p>The "Wipe Out Workspace" action available on jobs is controlled by the
+     * {@link Item#BUILD} permission. For some specific projects, however, it is
+     * not acceptable to let users have this possibility, even it they can
+     * trigger builds. As such, when enabling the {@code hudson.security.WipeOutPermission}
+     * system property, a new "WipeOut" permission will allow to have greater
+     * control on the "Wipe Out Workspace" action.</p>
+     */
+    public static boolean isWipeOutPermissionEnabled() {
+        return Boolean.getBoolean("hudson.security.WipeOutPermission");
     }
 
     public static String createRenderOnDemandProxy(JellyContext context, String attributesToCapture) {
@@ -1376,4 +1447,15 @@ public class Functions {
         return all;
     }
 
+    /**
+     * Returns an avatar image URL for the specified user and preferred image size
+     * @param user the user
+     * @param avatarSize the preferred size of the avatar image
+     * @return a URL string
+     * @since 1.433
+     */
+    public String getUserAvatar(User user, String avatarSize) {
+        return UserAvatarResolver.resolve(user, avatarSize);
+    }
+    
 }

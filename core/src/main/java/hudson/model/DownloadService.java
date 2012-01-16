@@ -26,15 +26,18 @@ package hudson.model;
 import hudson.Extension;
 import hudson.ExtensionList;
 import hudson.ExtensionPoint;
+import hudson.util.IOException2;
 import hudson.util.IOUtils;
 import hudson.util.QuotedStringTokenizer;
 import hudson.util.TextFile;
 import hudson.util.TimeUnit2;
 import jenkins.model.Jenkins;
+import net.sf.json.JSONException;
 import org.kohsuke.stapler.Stapler;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import net.sf.json.JSONObject;
@@ -53,10 +56,6 @@ import org.kohsuke.stapler.StaplerResponse;
  */
 @Extension
 public class DownloadService extends PageDecorator {
-    public DownloadService() {
-        super(DownloadService.class);
-    }
-
     /**
      * Builds up an HTML fragment that starts all the download jobs.
      */
@@ -73,7 +72,7 @@ public class DownloadService extends PageDecorator {
                        .append("  downloadService.download(")
                        .append(QuotedStringTokenizer.quote(d.getId()))
                        .append(',')
-                       .append(QuotedStringTokenizer.quote(d.getUrl()))
+                       .append(QuotedStringTokenizer.quote(mapHttps(d.getUrl())))
                        .append(',')
                        .append("{version:"+QuotedStringTokenizer.quote(Jenkins.VERSION)+'}')
                        .append(',')
@@ -87,6 +86,22 @@ public class DownloadService extends PageDecorator {
             }
         }
         return buf.toString();
+    }
+
+    private String mapHttps(String url) {
+        /*
+            HACKISH:
+
+            Loading scripts in HTTP from HTTPS pages cause browsers to issue a warning dialog.
+            The elegant way to solve the problem is to always load update center from HTTPS,
+            but our backend mirroring scheme isn't ready for that. So this hack serves regular
+            traffic in HTTP server, and only use HTTPS update center for Jenkins in HTTPS.
+
+            We'll monitor the traffic to see if we can sustain this added traffic.
+         */
+        if (url.startsWith("http://updates.jenkins-ci.org/") && Jenkins.getInstance().isRootUrlSecure())
+            return "https"+url.substring(4);
+        return url;
     }
 
     /**
@@ -119,9 +134,9 @@ public class DownloadService extends PageDecorator {
         /**
          *
          * @param url
-         *      URL relative to {@link UpdateCenter#getUrl()}.
+         *      URL relative to {@link UpdateCenter#getDefaultBaseUrl()}.
          *      So if this string is "foo.json", the ultimate URL will be
-         *      something like "https://hudson.dev.java.net/foo.json"
+         *      something like "http://updates.jenkins-ci.org/updates/foo.json"
          *
          *      For security and privacy reasons, we don't allow the retrieval
          *      from random locations.
@@ -194,7 +209,12 @@ public class DownloadService extends PageDecorator {
         public JSONObject getData() throws IOException {
             TextFile df = getDataFile();
             if(df.exists())
-                return JSONObject.fromObject(df.read());
+                try {
+                    return JSONObject.fromObject(df.read());
+                } catch (JSONException e) {
+                    df.delete(); // if we keep this file, it will cause repeated failures
+                    throw new IOException2("Failed to parse "+df+" into JSON",e);
+                }
             return null;
         }
 

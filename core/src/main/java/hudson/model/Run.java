@@ -43,6 +43,7 @@ import hudson.matrix.MatrixRun;
 import hudson.model.Descriptor.FormException;
 import hudson.model.listeners.RunListener;
 import hudson.model.listeners.SaveableListener;
+import hudson.security.PermissionScope;
 import jenkins.model.Jenkins.MasterComputer;
 import hudson.search.SearchIndexBuilder;
 import hudson.security.ACL;
@@ -112,7 +113,7 @@ import com.thoughtworks.xstream.XStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 
-import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.*;
 
 /**
  * A particular execution of {@link Job}.
@@ -398,6 +399,21 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     public Executor getExecutor() {
         for( Computer c : Jenkins.getInstance().getComputers() ) {
             for (Executor e : c.getExecutors()) {
+                if(e.getCurrentExecutable()==this)
+                    return e;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Gets the one off {@link Executor} building this job, if it's being built.
+     * Otherwise null.
+     * @since 1.433 
+     */
+    public Executor getOneOffExecutor() {
+        for( Computer c : Jenkins.getInstance().getComputers() ) {
+            for (Executor e : c.getOneOffExecutors()) {
                 if(e.getCurrentExecutable()==this)
                     return e;
             }
@@ -787,10 +803,9 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      * Obtains the absolute URL to this build.
      *
      * @deprecated
-     *      This method shall <b>NEVER</b> be used during HTML page rendering, as it won't work with
-     *      network set up like Apache reverse proxy.
-     *      This method is only intended for the remote API clients who cannot resolve relative references
-     *      (even this won't work for the same reason, which should be fixed.)
+     *      This method shall <b>NEVER</b> be used during HTML page rendering, as it's too easy for
+     *      misconfiguration to break this value, with network set up like Apache reverse proxy.
+     *      This method is only intended for the remote API clients who cannot resolve relative references.
      */
     @Exported(visibility=2,name="url")
     public final String getAbsoluteUrl() {
@@ -878,17 +893,20 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
             String childPath = path + child;
             String childHref = pathHref + Util.rawEncode(child);
             File sub = new File(dir, child);
+            String length = sub.isFile() ? String.valueOf(sub.length()) : "";
             boolean collapsed = (children.length==1 && parent!=null);
             Artifact a;
             if (collapsed) {
                 // Collapse single items into parent node where possible:
                 a = new Artifact(parent.getFileName() + '/' + child, childPath,
-                                 sub.isDirectory() ? null : childHref, parent.getTreeNodeId());
+                                 sub.isDirectory() ? null : childHref, length,
+                                 parent.getTreeNodeId());
                 r.tree.put(a, r.tree.remove(parent));
             } else {
                 // Use null href for a directory:
                 a = new Artifact(child, childPath,
-                                 sub.isDirectory() ? null : childHref, "n" + ++r.idSeq);
+                                 sub.isDirectory() ? null : childHref, length,
+                                 "n" + ++r.idSeq);
                 r.tree.put(a, parent!=null ? parent.getTreeNodeId() : null);
             }
             if (sub.isDirectory()) {
@@ -896,7 +914,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
                 if (n>=upTo) break;
             } else {
                 // Don't store collapsed path in ArrayList (for correct data in external API)
-                r.add(collapsed ? new Artifact(child, a.relativePath, a.href, a.treeNodeId) : a);
+                r.add(collapsed ? new Artifact(child, a.relativePath, a.href, length, a.treeNodeId) : a);
                 if (++n>=upTo) break;
             }
         }
@@ -1031,11 +1049,17 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
          */
         private String treeNodeId;
 
-        /*package for test*/ Artifact(String name, String relativePath, String href, String treeNodeId) {
+        /**
+         *length of this artifact for files.
+         */
+        private String length;
+
+        /*package for test*/ Artifact(String name, String relativePath, String href, String len, String treeNodeId) {
             this.name = name;
             this.relativePath = relativePath;
             this.href = href;
             this.treeNodeId = treeNodeId;
+            this.length = len;
         }
 
         /**
@@ -1060,6 +1084,10 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
         public String getHref() {
             return href;
+        }
+
+        public String getLength() {
+            return length;
         }
 
         public String getTreeNodeId() {
@@ -1388,8 +1416,9 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
                     LOGGER.log(FINE, "Build "+this+" aborted",e);
                 } catch( InterruptedException e) {
                     // aborted
-                    result = Result.ABORTED;
+                    result = Executor.currentExecutor().abortResult();
                     listener.getLogger().println(Messages.Run_BuildAborted());
+                    Executor.currentExecutor().recordCauseOfInterruption(Run.this,listener);
                     LOGGER.log(Level.INFO,toString()+" aborted",e);
                 } catch( Throwable e ) {
                     handleFatalBuildProblem(listener,e);
@@ -1453,6 +1482,8 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      */
     private void handleFatalBuildProblem(BuildListener listener, Throwable e) {
         if(listener!=null) {
+            LOGGER.log(FINE, getDisplayName()+" failed to build",e);
+
             if(e instanceof IOException)
                 Util.displayIOException((IOException)e,listener);
 
@@ -1465,6 +1496,8 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
                     // ignore
                 }
             }
+        } else {
+            LOGGER.log(SEVERE, getDisplayName()+" failed to build and we don't even have a listener",e);
         }
     }
 
@@ -1583,53 +1616,77 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     }
 
     /**
-     * Gets an object that computes the single line summary of this build.
+     * Gets an object which represents the single line summary of the status of this build
+     * (especially in comparison with the previous build.)
      */
     public Summary getBuildStatusSummary() {
-        Run prev = getPreviousBuild();
-
-        if(getResult()==Result.SUCCESS) {
-            if(prev==null || prev.getResult()== Result.SUCCESS)
+        ResultTrend trend = ResultTrend.getResultTrend(this);
+        
+        switch (trend) {
+            case ABORTED : return new Summary(false, Messages.Run_Summary_Aborted());
+            
+            case NOT_BUILT : return new Summary(false, Messages.Run_Summary_NotBuilt());
+            
+            case FAILURE : return new Summary(true, Messages.Run_Summary_BrokenSinceThisBuild());
+            
+            case STILL_FAILING : 
+                RunT since = getPreviousNotFailedBuild();
+                if(since==null)
+                    return new Summary(false, Messages.Run_Summary_BrokenForALongTime());
+                RunT failedBuild = since.getNextBuild();
+                return new Summary(false, Messages.Run_Summary_BrokenSince(failedBuild.getDisplayName()));
+           
+            case NOW_UNSTABLE:
+                return determineDetailedUnstableSummary(Boolean.FALSE);
+            case UNSTABLE :
+                return determineDetailedUnstableSummary(Boolean.TRUE);
+            case STILL_UNSTABLE :
+                return determineDetailedUnstableSummary(null);
+                
+            case SUCCESS :
                 return new Summary(false, Messages.Run_Summary_Stable());
-            else
+            
+            case FIXED :
                 return new Summary(false, Messages.Run_Summary_BackToNormal());
+                
         }
+        
+        return new Summary(false, Messages.Run_Summary_Unknown());
+    }
 
-        if(getResult()==Result.FAILURE) {
-            RunT since = getPreviousNotFailedBuild();
-            if(since==null)
-                return new Summary(false, Messages.Run_Summary_BrokenForALongTime());
-            if(since==prev)
-                return new Summary(true, Messages.Run_Summary_BrokenSinceThisBuild());
-            RunT failedBuild = since.getNextBuild();
-            return new Summary(false, Messages.Run_Summary_BrokenSince(failedBuild.getDisplayName()));
-        }
-
-        if(getResult()==Result.ABORTED)
-            return new Summary(false, Messages.Run_Summary_Aborted());
-
-        if(getResult()==Result.UNSTABLE) {
-            if(((Run)this) instanceof AbstractBuild) {
-                AbstractTestResultAction trN = ((AbstractBuild)(Run)this).getTestResultAction();
-                AbstractTestResultAction trP = prev==null ? null : ((AbstractBuild) prev).getTestResultAction();
-                if(trP==null) {
-                    if(trN!=null && trN.getFailCount()>0)
-                        return new Summary(false, Messages.Run_Summary_TestFailures(trN.getFailCount()));
-                    else // ???
-                        return new Summary(false, Messages.Run_Summary_Unstable());
+    /**
+     * @param worseOverride override the 'worse' parameter to this value.
+     *   May be null in which case 'worse' is calculated based on the number of failed tests.
+     */
+    private Summary determineDetailedUnstableSummary(Boolean worseOverride) {
+        if(((Run)this) instanceof AbstractBuild) {
+            AbstractTestResultAction trN = ((AbstractBuild)(Run)this).getTestResultAction();
+            Run prev = getPreviousBuild();
+            AbstractTestResultAction trP = prev==null ? null : ((AbstractBuild) prev).getTestResultAction();
+            if(trP==null) {
+                if(trN!=null && trN.getFailCount()>0)
+                    return new Summary(worseOverride != null ? worseOverride : true,
+                            Messages.Run_Summary_TestFailures(trN.getFailCount()));
+            } else {
+                if(trN.getFailCount()!= 0) {
+                    if(trP.getFailCount()==0)
+                        return new Summary(worseOverride != null ? worseOverride : true,
+                                Messages.Run_Summary_TestsStartedToFail(trN.getFailCount()));
+                    if(trP.getFailCount() < trN.getFailCount())
+                        return new Summary(worseOverride != null ? worseOverride : true,
+                                Messages.Run_Summary_MoreTestsFailing(trN.getFailCount()-trP.getFailCount(), trN.getFailCount()));
+                    if(trP.getFailCount() > trN.getFailCount())
+                        return new Summary(worseOverride != null ? worseOverride : false,
+                                Messages.Run_Summary_LessTestsFailing(trP.getFailCount()-trN.getFailCount(), trN.getFailCount()));
+                    
+                    return new Summary(worseOverride != null ? worseOverride : false,
+                            Messages.Run_Summary_TestsStillFailing(trN.getFailCount()));
                 }
-                if(trP.getFailCount()==0)
-                    return new Summary(true, Messages.Run_Summary_TestsStartedToFail(trN.getFailCount()));
-                if(trP.getFailCount() < trN.getFailCount())
-                    return new Summary(true, Messages.Run_Summary_MoreTestsFailing(trN.getFailCount()-trP.getFailCount(), trN.getFailCount()));
-                if(trP.getFailCount() > trN.getFailCount())
-                    return new Summary(false, Messages.Run_Summary_LessTestsFailing(trP.getFailCount()-trN.getFailCount(), trN.getFailCount()));
-
-                return new Summary(false, Messages.Run_Summary_TestsStillFailing(trN.getFailCount()));
             }
         }
-
-        return new Summary(false, Messages.Run_Summary_Unknown());
+        
+        return new Summary(worseOverride != null ? worseOverride : false,
+                Messages.Run_Summary_Unstable());
     }
 
     /**
@@ -1672,7 +1729,17 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
         rsp.setContentType("text/plain;charset=UTF-8");
         // Prevent jelly from flushing stream so Content-Length header can be added afterwards
         FlushProofOutputStream out = new FlushProofOutputStream(rsp.getCompressedOutputStream(req));
-        getLogText().writeLogTo(0,out);
+        try{
+        	getLogText().writeLogTo(0,out);
+        } catch (IOException e) {
+			// see comment in writeLogTo() method
+			InputStream input = getLogInputStream();
+			try {
+				IOUtils.copy(input, out);
+			} finally {
+				IOUtils.closeQuietly(input);
+			}
+		}
         out.close();
     }
 
@@ -1771,6 +1838,8 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
      * <p>
      * Unlike earlier {@link #getEnvVars()}, this map contains the whole environment,
      * not just the overrides, so one can introspect values to change its behavior.
+     * 
+     * @return the map with the environmental variables. Never <code>null</code>.
      * @since 1.305
      */
     public EnvVars getEnvironment(TaskListener log) throws IOException, InterruptedException {
@@ -1854,6 +1923,7 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
 
     public HttpResponse doConfigSubmit( StaplerRequest req ) throws IOException, ServletException, FormException {
         checkPermission(UPDATE);
+        requirePOST();
         BulkChange bc = new BulkChange(this);
         try {
             JSONObject json = req.getSubmittedForm();
@@ -1930,11 +2000,11 @@ public abstract class Run <JobT extends Job<JobT,RunT>,RunT extends Run<JobT,Run
     }
 
     public static final PermissionGroup PERMISSIONS = new PermissionGroup(Run.class,Messages._Run_Permissions_Title());
-    public static final Permission DELETE = new Permission(PERMISSIONS,"Delete",Messages._Run_DeletePermission_Description(),Permission.DELETE);
-    public static final Permission UPDATE = new Permission(PERMISSIONS,"Update",Messages._Run_UpdatePermission_Description(),Permission.UPDATE);
+    public static final Permission DELETE = new Permission(PERMISSIONS,"Delete",Messages._Run_DeletePermission_Description(),Permission.DELETE, PermissionScope.RUN);
+    public static final Permission UPDATE = new Permission(PERMISSIONS,"Update",Messages._Run_UpdatePermission_Description(),Permission.UPDATE, PermissionScope.RUN);
     /** See {@link hudson.Functions#isArtifactsPermissionEnabled} */
     public static final Permission ARTIFACTS = new Permission(PERMISSIONS,"Artifacts",Messages._Run_ArtifactsPermission_Description(), null,
-                                                              Functions.isArtifactsPermissionEnabled());
+                                                              Functions.isArtifactsPermissionEnabled(), new PermissionScope[]{PermissionScope.RUN});
 
     private static class DefaultFeedAdapter implements FeedAdapter<Run> {
         public String getEntryTitle(Run entry) {

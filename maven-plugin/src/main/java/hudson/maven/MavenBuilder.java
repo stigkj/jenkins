@@ -33,7 +33,6 @@ import hudson.model.Result;
 import hudson.remoting.Callable;
 import hudson.remoting.Channel;
 import hudson.remoting.DelegatingCallable;
-import hudson.remoting.Future;
 import hudson.util.IOException2;
 
 import java.io.IOException;
@@ -41,11 +40,9 @@ import java.io.PrintStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.text.NumberFormat;
-import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-
 import org.apache.maven.BuildFailureException;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.execution.ReactorManager;
@@ -73,6 +70,7 @@ import org.codehaus.plexus.configuration.PlexusConfiguration;
  * @author Kohsuke Kawaguchi
  * @since 1.133
  */
+@SuppressWarnings("deprecation") // as we're restricted to Maven 2.x API here, but compile against Maven 3.x we cannot avoid deprecations
 public abstract class MavenBuilder extends AbstractMavenBuilder implements DelegatingCallable<Result,IOException> {
 
 
@@ -82,14 +80,8 @@ public abstract class MavenBuilder extends AbstractMavenBuilder implements Deleg
      */
     private final boolean profile = MavenProcessFactory.profile;
 
-    /**
-     * Record all asynchronous executions as they are scheduled,
-     * to make sure they are all completed before we finish.
-     */
-    protected transient /*final*/ List<Future<?>> futures;
-
-    protected MavenBuilder(BuildListener listener, List<String> goals, Map<String, String> systemProps) {
-        super( listener, goals, systemProps );
+    protected MavenBuilder(BuildListener listener, Collection<MavenModule> modules, List<String> goals, Map<String, String> systemProps) {
+        super( listener, modules, goals, systemProps );
     }
 
     /**
@@ -142,7 +134,7 @@ public abstract class MavenBuilder extends AbstractMavenBuilder implements Deleg
         
         try {
 
-            futures = new ArrayList<Future<?>>();
+            initializeAsynchronousExecutions();
             Adapter a = new Adapter(this);
             callSetListenerWithReflectOnInterceptors( a, mavenJailProcessClassLoader );
             
@@ -153,38 +145,20 @@ public abstract class MavenBuilder extends AbstractMavenBuilder implements Deleg
             
             markAsSuccess = false;
 
-            // working around NPE when someone puts a null value into systemProps.
-            for (Map.Entry<String,String> e : systemProps.entrySet()) {
-                if (e.getValue()==null)
-                    throw new IllegalArgumentException("System property "+e.getKey()+" has a null value");
-                System.getProperties().put(e.getKey(), e.getValue());
-            }
+            registerSystemProperties();
 
             listener.getLogger().println(formatArgs(goals));
             int r = Main.launch(goals.toArray(new String[goals.size()]));
 
             // now check the completion status of async ops
-            boolean messageReported = false;
             long startTime = System.nanoTime();
-            for (Future<?> f : futures) {
-                try {
-                    if(!f.isDone() && !messageReported) {
-                        messageReported = true;
-                        listener.getLogger().println(Messages.MavenBuilder_Waiting());
-                    }
-                    f.get();
-                } catch (InterruptedException e) {
-                    // attempt to cancel all asynchronous tasks
-                    for (Future<?> g : futures)
-                        g.cancel(true);
-                    listener.getLogger().println(Messages.MavenBuilder_Aborted());
-                    return Result.ABORTED;
-                } catch (ExecutionException e) {
-                    e.printStackTrace(listener.error(Messages.MavenBuilder_AsyncFailed()));
-                }
+            
+            Result waitForAsyncExecutionsResult = waitForAsynchronousExecutions();
+            if (waitForAsyncExecutionsResult != null) {
+                return waitForAsyncExecutionsResult;
             }
+            
             a.overheadTime += System.nanoTime()-startTime;
-            futures.clear();
 
             if(profile) {
                 NumberFormat n = NumberFormat.getInstance();

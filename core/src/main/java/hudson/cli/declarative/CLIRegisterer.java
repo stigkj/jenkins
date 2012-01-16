@@ -29,6 +29,9 @@ import hudson.ExtensionFinder;
 import hudson.Util;
 import hudson.cli.CLICommand;
 import hudson.cli.CloneableCLICommand;
+import hudson.model.Hudson;
+import jenkins.ExtensionComponentSet;
+import jenkins.ExtensionRefreshException;
 import jenkins.model.Jenkins;
 import hudson.remoting.Channel;
 import hudson.security.CliAuthenticator;
@@ -63,9 +66,15 @@ import java.util.logging.Logger;
  */
 @Extension
 public class CLIRegisterer extends ExtensionFinder {
-    public <T> Collection<ExtensionComponent<T>> find(Class<T> type, Jenkins hudson) {
+    @Override
+    public ExtensionComponentSet refresh() throws ExtensionRefreshException {
+        // TODO: this is not complex. just bit tedious.
+        return ExtensionComponentSet.EMPTY;
+    }
+
+    public <T> Collection<ExtensionComponent<T>> find(Class<T> type, Hudson jenkins) {
         if (type==CLICommand.class)
-            return (List)discover(hudson);
+            return (List)discover(jenkins);
         else
             return Collections.emptyList();
     }
@@ -111,7 +120,6 @@ public class CLIRegisterer extends ExtensionFinder {
                             this.stdout = stdout;
                             this.stderr = stderr;
                             this.locale = locale;
-                            this.channel = Channel.current();
 
                             registerOptionHandlers();
                             CmdLineParser parser = new CmdLineParser(null);
@@ -139,7 +147,7 @@ public class CLIRegisterer extends ExtensionFinder {
                                     List<MethodBinder> binders = new ArrayList<MethodBinder>();
 
                                     while (!chains.isEmpty())
-                                        binders.add(new MethodBinder(chains.pop(),parser));
+                                        binders.add(new MethodBinder(chains.pop(),this,parser));
 
                                     // authentication
                                     CliAuthenticator authenticator = Jenkins.getInstance().getSecurityRealm().createCliAuthenticator(this);

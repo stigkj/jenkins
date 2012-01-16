@@ -1,9 +1,10 @@
 /*
  * The MIT License
  *
- * Copyright (c) 2004-2010, Sun Microsystems, Inc., Kohsuke Kawaguchi,
+ * Copyright (c) 2004-2011, Sun Microsystems, Inc., Kohsuke Kawaguchi,
  * Erik Ramfelt, Koichi Fujikawa, Red Hat, Inc., Seiji Sogabe,
- * Stephen Connolly, Tom Huybrechts, Yahoo! Inc., Alan Harder, CloudBees, Inc.
+ * Stephen Connolly, Tom Huybrechts, Yahoo! Inc., Alan Harder, CloudBees, Inc.,
+ * Yahoo!, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +26,68 @@
  */
 package jenkins.model;
 
+import com.google.common.collect.Lists;
+import com.google.inject.Injector;
+import hudson.ExtensionComponent;
+import hudson.ExtensionFinder;
+import hudson.model.Messages;
+import hudson.model.Node;
+import hudson.model.AbstractCIBase;
+import hudson.model.AbstractProject;
+import hudson.model.Action;
+import hudson.model.AdministrativeMonitor;
+import hudson.model.AllView;
+import hudson.model.Api;
+import hudson.model.Computer;
+import hudson.model.ComputerSet;
+import hudson.model.DependencyGraph;
+import hudson.model.Describable;
+import hudson.model.Descriptor;
+import hudson.model.DescriptorByNameOwner;
+import hudson.model.DirectoryBrowserSupport;
+import hudson.model.Failure;
+import hudson.model.Fingerprint;
+import hudson.model.FingerprintCleanupThread;
+import hudson.model.FingerprintMap;
+import hudson.model.FullDuplexHttpChannel;
+import hudson.model.Hudson;
+import hudson.model.Item;
+import hudson.model.ItemGroup;
+import hudson.model.ItemGroupMixIn;
+import hudson.model.Items;
+import hudson.model.JDK;
+import hudson.model.Job;
+import hudson.model.JobPropertyDescriptor;
+import hudson.model.Label;
+import hudson.model.ListView;
+import hudson.model.LoadBalancer;
+import hudson.model.ManagementLink;
+import hudson.model.ModifiableItemGroup;
+import hudson.model.NoFingerprintMatch;
+import hudson.model.OverallLoadStatistics;
+import hudson.model.Project;
+import hudson.model.RestartListener;
+import hudson.model.RootAction;
+import hudson.model.Slave;
+import hudson.model.TaskListener;
+import hudson.model.TopLevelItem;
+import hudson.model.TopLevelItemDescriptor;
+import hudson.model.UnprotectedRootAction;
+import hudson.model.UpdateCenter;
+import hudson.model.User;
+import hudson.model.View;
+import hudson.model.ViewGroup;
+import hudson.model.ViewGroupMixIn;
+import hudson.model.Descriptor.FormException;
+import hudson.model.labels.LabelAtom;
+import hudson.model.listeners.ItemListener;
+import hudson.model.listeners.SCMListener;
+import hudson.model.listeners.SaveableListener;
+import hudson.model.Queue;
+import hudson.model.WorkspaceCleanupThread;
+
 import antlr.ANTLRException;
+import com.google.common.collect.ImmutableMap;
 import com.thoughtworks.xstream.XStream;
 import hudson.BulkChange;
 import hudson.DNSMultiCast;
@@ -44,7 +106,6 @@ import hudson.Plugin;
 import hudson.PluginManager;
 import hudson.PluginWrapper;
 import hudson.ProxyConfiguration;
-import hudson.StructuredForm;
 import hudson.TcpSlaveAgentListener;
 import hudson.UDPBroadcastThread;
 import hudson.Util;
@@ -58,18 +119,11 @@ import hudson.cli.CliManagerImpl;
 import hudson.cli.declarative.CLIMethod;
 import hudson.cli.declarative.CLIResolver;
 import hudson.init.InitMilestone;
-import hudson.init.InitReactorListener;
 import hudson.init.InitStrategy;
 import hudson.lifecycle.Lifecycle;
 import hudson.logging.LogRecorderManager;
 import hudson.lifecycle.RestartNotSupportedException;
 import hudson.markup.RawHtmlMarkupFormatter;
-import hudson.model.*;
-import hudson.model.Descriptor.FormException;
-import hudson.model.labels.LabelAtom;
-import hudson.model.listeners.ItemListener;
-import hudson.model.listeners.SCMListener;
-import hudson.model.listeners.SaveableListener;
 import hudson.remoting.Channel;
 import hudson.remoting.LocalChannel;
 import hudson.remoting.VirtualChannel;
@@ -87,6 +141,7 @@ import hudson.security.LegacyAuthorizationStrategy;
 import hudson.security.LegacySecurityRealm;
 import hudson.security.Permission;
 import hudson.security.PermissionGroup;
+import hudson.security.PermissionScope;
 import hudson.security.SecurityMode;
 import hudson.security.SecurityRealm;
 import hudson.security.csrf.CrumbIssuer;
@@ -118,6 +173,7 @@ import hudson.util.Futures;
 import hudson.util.HudsonIsLoading;
 import hudson.util.HudsonIsRestarting;
 import hudson.util.Iterators;
+import hudson.util.JenkinsReloadFailed;
 import hudson.util.Memoizer;
 import hudson.util.MultipartFormDataParser;
 import hudson.util.RemotingDiagnostics;
@@ -126,12 +182,14 @@ import hudson.util.StreamTaskListener;
 import hudson.util.TextFile;
 import hudson.util.VersionNumber;
 import hudson.util.XStream2;
-import hudson.util.Service;
 import hudson.views.DefaultMyViewsTabBar;
 import hudson.views.DefaultViewsTabBar;
 import hudson.views.MyViewsTabBar;
 import hudson.views.ViewsTabBar;
 import hudson.widgets.Widget;
+import jenkins.ExtensionComponentSet;
+import jenkins.ExtensionRefreshException;
+import jenkins.InitReactorRunner;
 import net.sf.json.JSONObject;
 import org.acegisecurity.AccessDeniedException;
 import org.acegisecurity.AcegiSecurityException;
@@ -149,9 +207,7 @@ import org.jvnet.hudson.reactor.ReactorException;
 import org.jvnet.hudson.reactor.Task;
 import org.jvnet.hudson.reactor.TaskBuilder;
 import org.jvnet.hudson.reactor.TaskGraphBuilder;
-import org.jvnet.hudson.reactor.Milestone;
 import org.jvnet.hudson.reactor.Reactor;
-import org.jvnet.hudson.reactor.ReactorListener;
 import org.jvnet.hudson.reactor.TaskGraphBuilder.Handle;
 import org.kohsuke.args4j.Argument;
 import org.kohsuke.args4j.Option;
@@ -216,10 +272,8 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -237,7 +291,7 @@ import java.util.regex.Pattern;
  * @author Kohsuke Kawaguchi
  */
 @ExportedBean
-public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, StaplerProxy, StaplerFallback, ViewGroup, AccessControlled, DescriptorByNameOwner {
+public class Jenkins extends AbstractCIBase implements ModifiableItemGroup<TopLevelItem>, StaplerProxy, StaplerFallback, ViewGroup, AccessControlled, DescriptorByNameOwner {
     private transient final Queue queue;
 
     /**
@@ -305,6 +359,22 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * @see #setSecurityRealm(SecurityRealm)
      */
     private volatile SecurityRealm securityRealm = SecurityRealm.NO_AUTHENTICATION;
+
+    /**
+     * Root directory for the workspaces. This value will be variable-expanded against
+     * job name and JENKINS_HOME.
+     *
+     * @see #getWorkspaceFor(TopLevelItem)
+     */
+    private String workspaceDir = "${ITEM_ROOTDIR}/"+WORKSPACE_DIRNAME;
+
+    /**
+     * Root directory for the workspaces. This value will be variable-expanded against
+     * job name and JENKINS_HOME.
+     *
+     * @see #getBuildDirFor(Job)
+     */
+    private String buildsDir = "${ITEM_ROOTDIR}/builds";
 
     /**
      * Message displayed in the top page.
@@ -376,7 +446,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     /**
      * Active {@link Cloud}s.
      */
-    public final CloudList clouds = new CloudList(this);
+    public final Hudson.CloudList clouds = new Hudson.CloudList(this);
 
     public static class CloudList extends DescribableList<Cloud,Descriptor<Cloud>> {
         public CloudList(Jenkins h) {
@@ -438,6 +508,13 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      */
     private volatile String primaryView;
 
+    private transient final ViewGroupMixIn viewGroupMixIn = new ViewGroupMixIn(this) {
+        protected List<View> views() { return views; }
+        protected String primaryView() { return primaryView; }
+        protected void primaryView(String name) { primaryView=name; }
+    };
+
+
     private transient final FingerprintMap fingerprintMap = new FingerprintMap();
 
     /**
@@ -473,7 +550,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     private volatile CrumbIssuer crumbIssuer;
 
     /**
-     * All labels known to Hudson. This allows us to reuse the same label instances
+     * All labels known to Jenkins. This allows us to reuse the same label instances
      * as much as possible, even though that's not a strict requirement.
      */
     private transient final ConcurrentHashMap<String,Label> labels = new ConcurrentHashMap<String,Label>();
@@ -539,7 +616,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         }
 
         /**
-         *send the browser to the config page
+         * Send the browser to the config page.
          * use View to trim view/{default-view} from URL if possible
          */
         @Override
@@ -563,7 +640,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     /**
-     * Secrete key generated once and used for a long time, beyond
+     * Secret key generated once and used for a long time, beyond
      * container start/stop. Persisted outside <tt>config.xml</tt> to avoid
      * accidental exposure.
      */
@@ -594,8 +671,11 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * @param pluginManager
      *      If non-null, use existing plugin manager.  create a new one.
      */
+    @edu.umd.cs.findbugs.annotations.SuppressWarnings("SC_START_IN_CTOR") // bug in FindBugs. It flags UDPBroadcastThread.start() call but that's for another class
     protected Jenkins(File root, ServletContext context, PluginManager pluginManager) throws IOException, InterruptedException, ReactorException {
-    	// As hudson is starting, grant this process full control
+        long start = System.currentTimeMillis();
+        
+    	// As Jenkins is starting, grant this process full control
     	SecurityContextHolder.getContext().setAuthentication(ACL.SYSTEM);
         try {
             this.root = root;
@@ -605,10 +685,15 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
                 throw new IllegalStateException("second instance");
             theInstance = this;
 
+            if (!new File(root,"jobs").exists()) {
+                // if this is a fresh install, use more modern default layout that's consistent with slaves
+                workspaceDir = "${JENKINS_HOME}/workspace/${ITEM_FULLNAME}";
+            }
+
             // doing this early allows InitStrategy to set environment upfront
             final InitStrategy is = InitStrategy.get(Thread.currentThread().getContextClassLoader());
 
-            Trigger.timer = new Timer("Hudson cron thread");
+            Trigger.timer = new Timer("Jenkins cron thread");
             queue = new Queue(CONSISTENT_HASH?LoadBalancer.CONSISTENT_HASH:LoadBalancer.DEFAULT);
 
             try {
@@ -671,7 +756,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
                 udpBroadcastThread = new UDPBroadcastThread(this);
                 udpBroadcastThread.start();
             } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Faild to broadcast over UDP",e);
+                LOGGER.log(Level.WARNING, "Failed to broadcast over UDP",e);
             }
             dnsMultiCast = new DNSMultiCast(this);
 
@@ -684,8 +769,17 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
                         cl.onOnline(c,StreamTaskListener.fromStdout());
             }
 
-            for (ItemListener l : ItemListener.all())
+            for (ItemListener l : ItemListener.all()) {
+                long itemListenerStart = System.currentTimeMillis();
                 l.onLoaded();
+                if (LOG_STARTUP_PERFORMANCE)
+                    LOGGER.info(String.format("Took %dms for item listener %s startup",
+                            System.currentTimeMillis()-itemListenerStart,l.getClass().getName()));
+            }
+            
+            if (LOG_STARTUP_PERFORMANCE)
+                LOGGER.info(String.format("Took %dms for complete Jenkins startup",
+                        System.currentTimeMillis()-start));
         } finally {
             SecurityContextHolder.clearContext();
         }
@@ -726,55 +820,14 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
             }
         };
 
-        ExecutorService es;
-        if (PARALLEL_LOAD)
-            es = new ThreadPoolExecutor(
-                TWICE_CPU_NUM, TWICE_CPU_NUM, 5L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(), new DaemonThreadFactory());
-        else
-            es = Executors.newSingleThreadExecutor(new DaemonThreadFactory());
-        try {
-            reactor.execute(es,buildReactorListener());
-        } finally {
-            es.shutdownNow();   // upon a successful return the executor queue should be empty. Upon an exception, we want to cancel all pending tasks
-        }
+        new InitReactorRunner() {
+            @Override
+            protected void onInitMilestoneAttained(InitMilestone milestone) {
+                initLevel = milestone;
+            }
+        }.run(reactor);
     }
 
-    /**
-     * Aggregates all the listeners into one and returns it.
-     *
-     * <p>
-     * At this point plugins are not loaded yet, so we fall back to the META-INF/services look up to discover implementations.
-     * As such there's no way for plugins to participate into this process.
-     */
-    private ReactorListener buildReactorListener() throws IOException {
-        List<ReactorListener> r = (List) Service.loadInstances(Thread.currentThread().getContextClassLoader(), InitReactorListener.class);
-        r.add(new ReactorListener() {
-            final Level level = Level.parse( Configuration.getStringConfigParameter("initLogLevel", "FINE") );
-            public void onTaskStarted(Task t) {
-                LOGGER.log(level,"Started "+t.getDisplayName());
-            }
-
-            public void onTaskCompleted(Task t) {
-                LOGGER.log(level,"Completed "+t.getDisplayName());
-            }
-
-            public void onTaskFailed(Task t, Throwable err, boolean fatal) {
-                LOGGER.log(SEVERE, "Failed "+t.getDisplayName(),err);
-            }
-
-            public void onAttained(Milestone milestone) {
-                Level lv = level;
-                String s = "Attained "+milestone.toString();
-                if (milestone instanceof InitMilestone) {
-                    lv = Level.INFO; // noteworthy milestones --- at least while we debug problems further
-                    initLevel = (InitMilestone)milestone;
-                    s = initLevel.toString();
-                }
-                LOGGER.log(lv,s);
-            }
-        });
-        return new ReactorListener.Aggregator(r);
-    }
 
     public TcpSlaveAgentListener getTcpSlaveAgentListener() {
         return tcpSlaveAgentListener;
@@ -792,6 +845,27 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     @Exported
     public int getSlaveAgentPort() {
         return slaveAgentPort;
+    }
+
+    /**
+     * @param port
+     *      0 to indicate random available TCP port. -1 to disable this service.
+     */
+    public void setSlaveAgentPort(int port) throws IOException {
+        this.slaveAgentPort = port;
+
+        // relaunch the agent
+        if(tcpSlaveAgentListener==null) {
+            if(slaveAgentPort!=-1)
+                tcpSlaveAgentListener = new TcpSlaveAgentListener(slaveAgentPort);
+        } else {
+            if(tcpSlaveAgentListener.configuredPort!=slaveAgentPort) {
+                tcpSlaveAgentListener.shutdown();
+                tcpSlaveAgentListener = null;
+                if(slaveAgentPort!=-1)
+                    tcpSlaveAgentListener = new TcpSlaveAgentListener(slaveAgentPort);
+            }
+        }
     }
 
     public void setNodeName(String name) {
@@ -1039,7 +1113,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * every plugin reimplementing the singleton pattern.
      *
      * @param clazz The plugin class (beware class-loader fun, this will probably only work
-     * from within the hpi that defines the plugin class, it may or may not work in other cases)
+     * from within the jpi that defines the plugin class, it may or may not work in other cases)
      *
      * @return The plugin instance.
      */
@@ -1238,6 +1312,10 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         return names;
     }
 
+    public List<Action> getViewActions() {
+        return getActions();
+    }
+
     /**
      * Gets the names of all the {@link TopLevelItem}s.
      */
@@ -1248,18 +1326,8 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         return names;
     }
 
-    public synchronized View getView(String name) {
-        for (View v : views) {
-            if(v.getViewName().equals(name))
-                return v;
-        }
-        if (name != null && !name.equals(primaryView)) {
-            // Fallback to subview of primary view if it is a ViewGroup
-            View pv = getPrimaryView();
-            if (pv instanceof ViewGroup)
-                return ((ViewGroup)pv).getView(name);
-        }
-        return null;
+    public View getView(String name) {
+        return viewGroupMixIn.getView(name);
     }
 
     /**
@@ -1267,34 +1335,55 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      */
     @Exported
     public synchronized Collection<View> getViews() {
-        List<View> copy = new ArrayList<View>(views);
-        Collections.sort(copy, View.SORTER);
-        return copy;
+        return viewGroupMixIn.getViews();
     }
 
     public void addView(View v) throws IOException {
-        setViewOwner(v);
-        views.add(v);
-        save();
+        viewGroupMixIn.addView(v);
     }
 
     public boolean canDelete(View view) {
-        return !view.isDefault();  // Cannot delete primary view
+        return viewGroupMixIn.canDelete(view);
     }
 
     public synchronized void deleteView(View view) throws IOException {
-        if (views.size() <= 1)
-            throw new IllegalStateException("Cannot delete last view");
-        views.remove(view);
-        save();
+        viewGroupMixIn.deleteView(view);
+    }
+
+    public void onViewRenamed(View view, String oldName, String newName) {
+        viewGroupMixIn.onViewRenamed(view,oldName,newName);
+    }
+
+    /**
+     * Returns the primary {@link View} that renders the top-page of Hudson.
+     */
+    @Exported
+    public View getPrimaryView() {
+        return viewGroupMixIn.getPrimaryView();
+     }
+
+    public void setPrimaryView(View v) {
+        this.primaryView = v.getViewName();
     }
 
     public ViewsTabBar getViewsTabBar() {
         return viewsTabBar;
     }
 
+    public void setViewsTabBar(ViewsTabBar viewsTabBar) {
+        this.viewsTabBar = viewsTabBar;
+    }
+
+    public Jenkins getItemGroup() {
+        return this;
+   }
+
     public MyViewsTabBar getMyViewsTabBar() {
         return myViewsTabBar;
+    }
+
+    public void setMyViewsTabBar(MyViewsTabBar myViewsTabBar) {
+        this.myViewsTabBar = myViewsTabBar;
     }
 
     /**
@@ -1575,22 +1664,31 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     /**
+     * Sets the global quiet period.
+     *
+     * @param quietPeriod
+     *      null to the default value.
+     */
+    public void setQuietPeriod(Integer quietPeriod) throws IOException {
+        this.quietPeriod = quietPeriod;
+        save();
+    }
+
+    /**
      * Gets the global SCM check out retry count.
      */
     public int getScmCheckoutRetryCount() {
         return scmCheckoutRetryCount;
     }
 
+    public void setScmCheckoutRetryCount(int scmCheckoutRetryCount) throws IOException {
+        this.scmCheckoutRetryCount = scmCheckoutRetryCount;
+        save();
+    }
+
     @Override
     public String getSearchUrl() {
         return "";
-    }
-
-    public void onViewRenamed(View view, String oldName, String newName) {
-        // If this view was the default view, change reference
-        if (oldName.equals(primaryView)) {
-            primaryView = newName;
-        }
     }
 
     @Override
@@ -1614,24 +1712,13 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
             });
     }
 
-    /**
-     * Returns the primary {@link View} that renders the top-page of Hudson.
-     */
-    @Exported
-    public View getPrimaryView() {
-        View v = getView(primaryView);
-        if(v==null) // fallback
-            v = views.get(0);
-        return v;
-    }
-
     public String getUrlChildPrefix() {
         return "job";
     }
 
     /**
-     * Gets the absolute URL of Hudson,
-     * such as "http://localhost/hudson/".
+     * Gets the absolute URL of Jenkins,
+     * such as "http://localhost/jenkins/".
      *
      * <p>
      * This method first tries to use the manually configured value, then
@@ -1650,12 +1737,26 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     public String getRootUrl() {
         // for compatibility. the actual data is stored in Mailer
         String url = Mailer.descriptor().getUrl();
-        if(url!=null)   return url;
+        if(url!=null) {
+            if (!url.endsWith("/")) url += '/';
+            return url;
+        }
 
         StaplerRequest req = Stapler.getCurrentRequest();
         if(req!=null)
             return getRootUrlFromRequest();
         return null;
+    }
+
+    /**
+     * Is Jenkins running in HTTPS?
+     *
+     * Note that we can't really trust {@link StaplerRequest#isSecure()} because HTTPS might be terminated
+     * in the reverse proxy.
+     */
+    public boolean isRootUrlSecure() {
+        String url = getRootUrl();
+        return url!=null && url.startsWith("https");
     }
 
     /**
@@ -1686,7 +1787,26 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     public FilePath getWorkspaceFor(TopLevelItem item) {
-        return new FilePath(new File(item.getRootDir(), WORKSPACE_DIRNAME));
+        return new FilePath(expandVariablesForDirectory(workspaceDir, item));
+    }
+
+    public File getBuildDirFor(Job job) {
+        return expandVariablesForDirectory(buildsDir, job);
+    }
+
+    private File expandVariablesForDirectory(String base, Item item) {
+        return new File(Util.replaceMacro(base, ImmutableMap.of(
+                "JENKINS_HOME", getRootDir().getPath(),
+                "ITEM_ROOTDIR", item.getRootDir().getPath(),
+                "ITEM_FULLNAME", item.getFullName())));
+    }
+    
+    public String getRawWorkspaceDir() {
+        return workspaceDir;
+    }
+
+    public String getRawBuildsDir() {
+        return buildsDir;
     }
 
     public FilePath getRootPath() {
@@ -1755,6 +1875,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     public void setSecurityRealm(SecurityRealm securityRealm) {
         if(securityRealm==null)
             securityRealm= SecurityRealm.NO_AUTHENTICATION;
+        this.useSecurity = true;
         this.securityRealm = securityRealm;
         // reset the filters and proxies for the new SecurityRealm
         try {
@@ -1777,11 +1898,29 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     public void setAuthorizationStrategy(AuthorizationStrategy a) {
         if (a == null)
             a = AuthorizationStrategy.UNSECURED;
+        useSecurity = true;
         authorizationStrategy = a;
+    }
+
+    public void disableSecurity() {
+        useSecurity = null;
+        setSecurityRealm(SecurityRealm.NO_AUTHENTICATION);
+        authorizationStrategy = AuthorizationStrategy.UNSECURED;
+        markupFormatter = null;
     }
 
     public Lifecycle getLifecycle() {
         return Lifecycle.get();
+    }
+
+    /**
+     * Gets the dependency injection container that hosts all the extension implementations and other
+     * components in Jenkins.
+     *
+     * @since 1.GUICE
+     */
+    public Injector getInjector() {
+        return lookup(Injector.class);
     }
 
     /**
@@ -1820,6 +1959,48 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     /**
+     * Refresh {@link ExtensionList}s by adding all the newly discovered extensions.
+     *
+     * Exposed only for {@link PluginManager#dynamicLoad(File)}.
+     */
+    public void refreshExtensions() throws ExtensionRefreshException {
+        ExtensionList<ExtensionFinder> finders = getExtensionList(ExtensionFinder.class);
+        for (ExtensionFinder ef : finders) {
+            if (!ef.isRefreshable())
+                throw new ExtensionRefreshException(ef+" doesn't support refresh");
+        }
+
+        List<ExtensionComponentSet> fragments = Lists.newArrayList();
+        for (ExtensionFinder ef : finders) {
+            fragments.add(ef.refresh());
+        }
+        ExtensionComponentSet delta = ExtensionComponentSet.union(fragments);
+
+        // if we find a new ExtensionFinder, we need it to list up all the extension points as well
+        List<ExtensionComponent<ExtensionFinder>> newFinders = Lists.newArrayList(delta.find(ExtensionFinder.class));
+        while (!newFinders.isEmpty()) {
+            ExtensionFinder f = newFinders.remove(newFinders.size()-1).getInstance();
+
+            ExtensionComponentSet ecs = ExtensionComponentSet.allOf(f);
+            newFinders.addAll(ecs.find(ExtensionFinder.class));
+            delta = ExtensionComponentSet.union(delta, ecs);
+        }
+
+        for (ExtensionList el : extensionLists.values()) {
+            el.refresh(delta);
+        }
+        for (ExtensionList el : descriptorLists.values()) {
+            el.refresh(delta);
+        }
+
+        // TODO: we need some generalization here so that extension points can be notified when a refresh happens?
+        for (ExtensionComponent<RootAction> ea : delta.find(RootAction.class)) {
+            Action a = ea.getInstance();
+            if (!actions.contains(a)) actions.add(a);
+        }
+    }
+
+    /**
      * Returns the root {@link ACL}.
      *
      * @see AuthorizationStrategy#getRootACL()
@@ -1844,6 +2025,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * can be finished while other current pending builds
      * are still in progress.
      */
+    @Exported
     public boolean isQuietingDown() {
         return isQuietingDown;
     }
@@ -1879,6 +2061,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * Note that the look up is case-insensitive.
      */
     public TopLevelItem getItem(String name) {
+        if (name==null)    return null;
     	TopLevelItem item = items.get(name);
         if (item==null || !item.hasPermission(Item.READ))
             return null;
@@ -1900,6 +2083,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      */
     public Item getItem(String relativeName, ItemGroup context) {
         if (context==null)  context = this;
+        if (relativeName==null) return null;
 
         if (relativeName.startsWith("/"))   // absolute
             return getItemByFullName(relativeName);
@@ -2124,8 +2308,18 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         return mode;
     }
 
+    public void setMode(Mode m) throws IOException {
+        this.mode = m;
+        save();
+    }
+
     public String getLabelString() {
         return fixNull(label).trim();
+    }
+
+    public void setLabelString(String label) throws IOException {
+        this.label = label;
+        save();
     }
 
     @Override
@@ -2134,7 +2328,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     public Computer createComputer() {
-        return new MasterComputer();
+        return new Hudson.MasterComputer();
     }
 
     private synchronized TaskBuilder loadTasks() throws IOException {
@@ -2251,6 +2445,9 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * Called to shut down the system.
      */
     public void cleanUp() {
+        for (ItemListener l : ItemListener.all())
+            l.onBeforeShutdown();
+
         Set<Future<?>> pending = new HashSet<Future<?>>();
         terminating = true;
         for( Computer c : computers.values() ) {
@@ -2324,90 +2521,8 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
 
             JSONObject json = req.getSubmittedForm();
 
-            // keep using 'useSecurity' field as the main configuration setting
-            // until we get the new security implementation working
-            // useSecurity = null;
-            if (json.has("use_security")) {
-                useSecurity = true;
-                JSONObject security = json.getJSONObject("use_security");
-                setSecurityRealm(SecurityRealm.all().newInstanceFromRadioList(security,"realm"));
-                setAuthorizationStrategy(AuthorizationStrategy.all().newInstanceFromRadioList(security, "authorization"));
-
-                if (security.has("markupFormatter")) {
-                    markupFormatter = req.bindJSON(MarkupFormatter.class,security.getJSONObject("markupFormatter"));
-                } else {
-                    markupFormatter = null;
-                }
-            } else {
-                useSecurity = null;
-                setSecurityRealm(SecurityRealm.NO_AUTHENTICATION);
-                authorizationStrategy = AuthorizationStrategy.UNSECURED;
-                markupFormatter = null;
-            }
-
-            if (json.has("csrf")) {
-            	JSONObject csrf = json.getJSONObject("csrf");
-                setCrumbIssuer(CrumbIssuer.all().newInstanceFromRadioList(csrf, "issuer"));
-            } else {
-            	setCrumbIssuer(null);
-            }
-
-            if (json.has("viewsTabBar")) {
-                viewsTabBar = req.bindJSON(ViewsTabBar.class,json.getJSONObject("viewsTabBar"));
-            } else {
-                viewsTabBar = new DefaultViewsTabBar();
-            }
-
-            if (json.has("myViewsTabBar")) {
-                myViewsTabBar = req.bindJSON(MyViewsTabBar.class,json.getJSONObject("myViewsTabBar"));
-            } else {
-                myViewsTabBar = new DefaultMyViewsTabBar();
-            }
-
-            primaryView = json.has("primaryView") ? json.getString("primaryView") : getViews().iterator().next().getViewName();
-
-            noUsageStatistics = json.has("usageStatisticsCollected") ? null : true;
-
-            {
-                String v = req.getParameter("slaveAgentPortType");
-                if(!isUseSecurity() || v==null || v.equals("random"))
-                    slaveAgentPort = 0;
-                else
-                if(v.equals("disable"))
-                    slaveAgentPort = -1;
-                else {
-                    try {
-                        slaveAgentPort = Integer.parseInt(req.getParameter("slaveAgentPort"));
-                    } catch (NumberFormatException e) {
-                        throw new FormException(Messages.Hudson_BadPortNumber(req.getParameter("slaveAgentPort")),"slaveAgentPort");
-                    }
-                }
-
-                // relaunch the agent
-                if(tcpSlaveAgentListener==null) {
-                    if(slaveAgentPort!=-1)
-                        tcpSlaveAgentListener = new TcpSlaveAgentListener(slaveAgentPort);
-                } else {
-                    if(tcpSlaveAgentListener.configuredPort!=slaveAgentPort) {
-                        tcpSlaveAgentListener.shutdown();
-                        tcpSlaveAgentListener = null;
-                        if(slaveAgentPort!=-1)
-                            tcpSlaveAgentListener = new TcpSlaveAgentListener(slaveAgentPort);
-                    }
-                }
-            }
-
-            numExecutors = json.getInt("numExecutors");
-            if(req.hasParameter("master.mode"))
-                mode = Mode.valueOf(req.getParameter("master.mode"));
-            else
-                mode = Mode.NORMAL;
-
-            label = json.optString("labelString","");
-
-            quietPeriod = json.getInt("quiet_period");
-
-            scmCheckoutRetryCount = json.getInt("retry_count");
+            workspaceDir = json.getString("rawWorkspaceDir");
+            buildsDir = json.getString("rawBuildsDir");
 
             systemMessage = Util.nullify(req.getParameter("system_message"));
 
@@ -2417,16 +2532,6 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
             boolean result = true;
             for( Descriptor<?> d : Functions.getSortedDescriptorsForGlobalConfig() )
                 result &= configureDescriptor(req,json,d);
-
-            for( JSONObject o : StructuredForm.toList(json,"plugin"))
-                pluginManager.getPlugin(o.getString("name")).getPlugin().configure(req, o);
-
-            clouds.rebuildHetero(req,json, Cloud.all(), "cloud");
-
-            JSONObject np = json.getJSONObject("globalNodeProperties");
-            if (np != null) {
-                globalNodeProperties.rebuild(req, np, NodeProperty.for_(this));
-            }
 
             version = VERSION;
 
@@ -2571,7 +2676,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         return r;
     }
 
-    public synchronized Item doCreateItem( StaplerRequest req, StaplerResponse rsp ) throws IOException, ServletException {
+    public synchronized TopLevelItem doCreateItem( StaplerRequest req, StaplerResponse rsp ) throws IOException, ServletException {
         return itemGroupMixIn.createTopLevelItem(req, rsp);
     }
 
@@ -2720,7 +2825,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     }
 
     public Slave.JnlpJar doJnlpJars(StaplerRequest req) {
-        return new Slave.JnlpJar(req.getRestOfPath());
+        return new Slave.JnlpJar(req.getRestOfPath().substring(1));
     }
 
     /**
@@ -2733,18 +2838,15 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         // engage "loading ..." UI and then run the actual task in a separate thread
         servletContext.setAttribute("app", new HudsonIsLoading());
 
-        new Thread("Hudson config reload thread") {
+        new Thread("Jenkins config reload thread") {
             @Override
             public void run() {
                 try {
                     SecurityContextHolder.getContext().setAuthentication(ACL.SYSTEM);
                     reload();
-                } catch (IOException e) {
-                    LOGGER.log(SEVERE,"Failed to reload Hudson config",e);
-                } catch (ReactorException e) {
-                    LOGGER.log(SEVERE,"Failed to reload Hudson config",e);
-                } catch (InterruptedException e) {
-                    LOGGER.log(SEVERE,"Failed to reload Hudson config",e);
+                } catch (Exception e) {
+                    LOGGER.log(SEVERE,"Failed to reload Jenkins config",e);
+                    WebApp.get(servletContext).setApp(new JenkinsReloadFailed(e));
                 }
             }
         }.start();
@@ -2781,6 +2883,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
     /**
      * For debugging. Expose URL to perform GC.
      */
+    @edu.umd.cs.findbugs.annotations.SuppressWarnings("DM_GC")
     public void doGc(StaplerResponse rsp) throws IOException {
         checkPermission(Jenkins.ADMINISTER);
         System.gc();
@@ -2834,7 +2937,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
                 protected void main(Channel channel) throws IOException, InterruptedException {
                     // capture the identity given by the transport, since this can be useful for SecurityRealm.createCliAuthenticator()
                     channel.setProperty(CLICommand.TRANSPORT_AUTHENTICATION,getAuthentication());
-                    channel.setProperty(CliEntryPoint.class.getName(),new CliManagerImpl());
+                    channel.setProperty(CliEntryPoint.class.getName(),new CliManagerImpl(channel));
                 }
             });
             try {
@@ -2967,15 +3070,18 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * Shutdown the system.
      * @since 1.161
      */
+    @CLIMethod(name="shutdown")
     public void doExit( StaplerRequest req, StaplerResponse rsp ) throws IOException {
         checkPermission(ADMINISTER);
         LOGGER.severe(String.format("Shutting down VM as requested by %s from %s",
-                getAuthentication().getName(), req.getRemoteAddr()));
-        rsp.setStatus(HttpServletResponse.SC_OK);
-        rsp.setContentType("text/plain");
-        PrintWriter w = rsp.getWriter();
-        w.println("Shutting down");
-        w.close();
+                getAuthentication().getName(), req!=null?req.getRemoteAddr():"???"));
+        if (rsp!=null) {
+            rsp.setStatus(HttpServletResponse.SC_OK);
+            rsp.setContentType("text/plain");
+            PrintWriter w = rsp.getWriter();
+            w.println("Shutting down");
+            w.close();
+        }
 
         System.exit(0);
     }
@@ -2985,6 +3091,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * Shutdown the system safely.
      * @since 1.332
      */
+    @CLIMethod(name="safe-shutdown")
     public HttpResponse doSafeExit(StaplerRequest req) throws IOException {
         checkPermission(ADMINISTER);
         isQuietingDown = true;
@@ -3048,7 +3155,7 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
 
     private void doScript(StaplerRequest req, StaplerResponse rsp, RequestDispatcher view) throws IOException, ServletException {
         // ability to run arbitrary script is dangerous
-        checkPermission(ADMINISTER);
+        checkPermission(RUN_SCRIPTS);
 
         String text = req.getParameter("script");
         if (text != null) {
@@ -3227,7 +3334,11 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
      * Rebuilds the dependency map.
      */
     public void rebuildDependencyGraph() {
-        dependencyGraph = new DependencyGraph();
+        DependencyGraph graph = new DependencyGraph();
+        graph.build();
+        // volatile acts a as a memory barrier here and therefore guarantees 
+        // that graph is fully build, before it's visible to other threads
+        dependencyGraph = graph;
     }
 
     public DependencyGraph getDependencyGraph() {
@@ -3297,6 +3408,85 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
         return getPrimaryView();
     }
 
+    /**
+     * This method checks all existing jobs to see if displayName is 
+     * unique. It does not check the displayName against the displayName of the
+     * job that the user is configuring though to prevent a validation warning 
+     * if the user sets the displayName to what it currently is.
+     * @param displayName
+     * @param currentJobName
+     * @return
+     */
+    boolean isDisplayNameUnique(String displayName, String currentJobName) {
+        Collection<TopLevelItem> itemCollection = items.values();
+        
+        // if there are a lot of projects, we'll have to store their 
+        // display names in a HashSet or something for a quick check
+        for(TopLevelItem item : itemCollection) {
+            if(item.getName().equals(currentJobName)) {
+                // we won't compare the candidate displayName against the current
+                // item. This is to prevent an validation warning if the user 
+                // sets the displayName to what the existing display name is
+                continue;
+            }
+            else if(displayName.equals(item.getDisplayName())) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    /**
+     * True if there is no item in Jenkins that has this name
+     * @param name The name to test
+     * @param currentJobName The name of the job that the user is configuring
+     * @return
+     */
+    boolean isNameUnique(String name, String currentJobName) {
+        Item item = getItem(name);
+        
+        if(null==item) {
+            // the candidate name didn't return any items so the name is unique
+            return true;
+        }
+        else if(item.getName().equals(currentJobName)) {
+            // the candidate name returned an item, but the item is the item
+            // that the user is configuring so this is ok
+            return true;
+        } 
+        else {
+            // the candidate name returned an item, so it is not unique
+            return false;
+        }
+    }
+    
+    /**
+     * Checks to see if the candidate displayName collides with any 
+     * existing display names or project names
+     * @param displayName The display name to test
+     * @param jobName The name of the job the user is configuring
+     * @return
+     */
+    public FormValidation doCheckDisplayName(@QueryParameter String displayName, 
+            @QueryParameter String jobName) {
+        displayName = displayName.trim();
+        
+        if(LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.log(Level.FINE, "Current job name is " + jobName);
+        }
+        
+        if(!isNameUnique(displayName, jobName)) {
+            return FormValidation.warning(Messages.Jenkins_CheckDisplayName_NameNotUniqueWarning(displayName));
+        }
+        else if(!isDisplayNameUnique(displayName, jobName)){
+            return FormValidation.warning(Messages.Jenkins_CheckDisplayName_DisplayNameNotUniqueWarning(displayName));
+        }
+        else {
+            return FormValidation.ok();
+        }
+    }
+    
     public static class MasterComputer extends Computer {
         protected MasterComputer() {
             super(Jenkins.getInstance());
@@ -3508,7 +3698,6 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
 
     public static boolean PARALLEL_LOAD = Configuration.getBooleanConfigParameter("parallelLoad", true);
     public static boolean KILL_AFTER_LOAD = Configuration.getBooleanConfigParameter("killAfterLoad", false);
-    public static boolean LOG_STARTUP_PERFORMANCE = Configuration.getBooleanConfigParameter("logStartupPerformance", false);
     private static final boolean CONSISTENT_HASH = true; // Boolean.getBoolean(Hudson.class.getName()+".consistentHash");
     /**
      * Enabled by default as of 1.337. Will keep it for a while just in case we have some serious problems.
@@ -3539,7 +3728,8 @@ public class Jenkins extends AbstractCIBase implements ItemGroup<TopLevelItem>, 
 
     public static final PermissionGroup PERMISSIONS = Permission.HUDSON_PERMISSIONS;
     public static final Permission ADMINISTER = Permission.HUDSON_ADMINISTER;
-    public static final Permission READ = new Permission(PERMISSIONS,"Read",Messages._Hudson_ReadPermission_Description(),Permission.READ);
+    public static final Permission READ = new Permission(PERMISSIONS,"Read",Messages._Hudson_ReadPermission_Description(),Permission.READ,PermissionScope.JENKINS);
+    public static final Permission RUN_SCRIPTS = new Permission(PERMISSIONS, "RunScripts", Messages._Hudson_RunScriptsPermission_Description(),ADMINISTER,PermissionScope.JENKINS);
 
     /**
      * {@link Authentication} object that represents the anonymous user.

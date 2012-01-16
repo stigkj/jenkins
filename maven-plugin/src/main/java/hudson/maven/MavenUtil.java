@@ -24,6 +24,7 @@
 package hudson.maven;
 
 import hudson.AbortException;
+import hudson.FilePath;
 import hudson.Util;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
@@ -51,6 +52,8 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.maven.artifact.versioning.ComparableVersion;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.ProjectBuildingException;
+
+import edu.umd.cs.findbugs.annotations.SuppressWarnings;
 
 /**
  * @author Kohsuke Kawaguchi
@@ -90,7 +93,7 @@ public class MavenUtil {
         Properties systemProperties = null;
         String privateRepository = null;
         
-        AbstractProject project = build.getProject();
+        AbstractProject<?,?> project = build.getProject();
         
         if (project instanceof ProjectWithMaven) {
             m = ((ProjectWithMaven) project).inferMavenInstallation().forNode(Jenkins.getInstance(),listener);
@@ -100,8 +103,9 @@ public class MavenUtil {
             settingsLoc = (altSet == null) ? null 
                 : new File(build.getWorkspace().child(altSet).getRemote());
 
-            if (((MavenModuleSet) project).usesPrivateRepository()) {
-                privateRepository = build.getWorkspace().child(".repository").getRemote();
+            FilePath localRepo = ((MavenModuleSet) project).getLocalRepository().locate((MavenModuleSetBuild) build);
+            if (localRepo!=null) {
+                privateRepository = localRepo.getRemote();
             }
 
             profiles = ((MavenModuleSet) project).getProfiles();
@@ -136,6 +140,7 @@ public class MavenUtil {
      * Creates a fresh {@link MavenEmbedder} instance.
      *
      */
+    @SuppressWarnings("RV_RETURN_VALUE_IGNORED_BAD_PRACTICE")
     public static MavenEmbedder createEmbedder(MavenEmbedderRequest mavenEmbedderRequest) throws MavenEmbedderException, IOException {
         
         
@@ -145,8 +150,7 @@ public class MavenUtil {
         File m2Home = new File(MavenEmbedder.userHome, ".m2");
         m2Home.mkdirs();
         if(!m2Home.exists())
-            throw new AbortException("Failed to create "+m2Home+
-                "\nSee https://hudson.dev.java.net/cannot-create-.m2.html");
+            throw new AbortException("Failed to create "+m2Home);
 
         if (mavenEmbedderRequest.getPrivateRepository()!=null)
             mavenRequest.setLocalRepositoryPath( mavenEmbedderRequest.getPrivateRepository() );
@@ -161,10 +165,12 @@ public class MavenUtil {
         } else {
             mavenRequest.setUserSettingsFile( new File( m2Home, "settings.xml" ).getAbsolutePath() );
         }
-        
 
-        // FIXME configure those !!
-        mavenRequest.setGlobalSettingsFile( new File( mavenEmbedderRequest.getMavenHome(), "conf/settings.xml" ).getAbsolutePath() );
+        if ( mavenEmbedderRequest.getGlobalSettings() != null) {
+            mavenRequest.setGlobalSettingsFile( mavenEmbedderRequest.getGlobalSettings().getAbsolutePath() );
+        } else {
+            mavenRequest.setGlobalSettingsFile( new File( mavenEmbedderRequest.getMavenHome(), "conf/settings.xml" ).getAbsolutePath() );
+        }
         
         if (mavenEmbedderRequest.getWorkspaceReader() != null ) {
             mavenRequest.setWorkspaceReader( mavenEmbedderRequest.getWorkspaceReader() );

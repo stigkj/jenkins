@@ -4,7 +4,8 @@
  * Copyright (c) 2004-2011, Sun Microsystems, Inc., Kohsuke Kawaguchi,
  * Brian Westrich, Erik Ramfelt, Ertan Deniz, Jean-Baptiste Quenot,
  * Luca Domenico Milanesio, R. Tyler Ballance, Stephen Connolly, Tom Huybrechts,
- * id:cactusman, Yahoo! Inc., Andrew Bayer
+ * id:cactusman, Yahoo! Inc., Andrew Bayer, Manufacture Francaise des Pneumatiques
+ * Michelin, Romain Seguy
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +27,7 @@
  */
 package hudson.model;
 
-import java.util.regex.Pattern;
+import hudson.Functions;
 import antlr.ANTLRException;
 import hudson.AbortException;
 import hudson.CopyOnWrite;
@@ -39,7 +40,7 @@ import hudson.cli.declarative.CLIResolver;
 import hudson.diagnosis.OldDataMonitor;
 import hudson.model.Cause.LegacyCodeCause;
 import hudson.model.Cause.RemoteCause;
-import hudson.model.Cause.UserCause;
+import hudson.model.Cause.UserIdCause;
 import hudson.model.Descriptor.FormException;
 import hudson.model.Fingerprint.RangeSet;
 import hudson.model.Queue.Executable;
@@ -122,6 +123,7 @@ import static javax.servlet.http.HttpServletResponse.*;
  * @author Kohsuke Kawaguchi
  * @see AbstractBuild
  */
+@SuppressWarnings("rawtypes")
 public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends AbstractBuild<P,R>> extends Job<P,R> implements BuildableItem {
 
     /**
@@ -366,15 +368,24 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
     }
 
     /**
-     * Returns the root project value.
+     * Gets the nearest ancestor {@link TopLevelItem} that's also an {@link AbstractProject}.
      *
-     * @return the root project value.
+     * <p>
+     * Some projects (such as matrix projects, Maven projects, or promotion processes) form a tree of jobs
+     * that acts as a single unit. This method can be used to find the top most dominating job that
+     * covers such a tree.
+     *
+     * @return never null.
+     * @see AbstractBuild#getRootBuild()
      */
-    public AbstractProject getRootProject() {
-        if (this.getParent() instanceof Jenkins) {
+    public AbstractProject<?,?> getRootProject() {
+        if (this instanceof TopLevelItem) {
             return this;
         } else {
-            return ((AbstractProject) this.getParent()).getRootProject();
+            ItemGroup p = this.getParent();
+            if (p instanceof AbstractProject)
+                return ((AbstractProject) p).getRootProject();
+            return this;
         }
     }
 
@@ -769,6 +780,7 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      *      For the convenience of the caller, this collection can contain null, and those will be silently ignored.
      * @since 1.383
      */
+    @SuppressWarnings("unchecked")
     public Future<R> scheduleBuild2(int quietPeriod, Cause c, Collection<? extends Action> actions) {
         if (!isBuildable())
             return null;
@@ -818,6 +830,7 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      * Production code shouldn't be using this, but for tests this is very convenient, so this isn't marked
      * as deprecated.
      */
+    @SuppressWarnings("deprecation")
     public Future<R> scheduleBuild2(int quietPeriod) {
         return scheduleBuild2(quietPeriod, new LegacyCodeCause());
     }
@@ -1081,10 +1094,10 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      * This means eventually there will be an automatic triggering of
      * the given project (provided that all builds went smoothly.)
      */
-    protected AbstractProject getBuildingDownstream() {
+    public AbstractProject getBuildingDownstream() {
         Set<Task> unblockedTasks = Jenkins.getInstance().getQueue().getUnblockedTasks();
 
-        for (AbstractProject tup : Jenkins.getInstance().getDependencyGraph().getTransitiveDownstream(this)) {
+        for (AbstractProject tup : getTransitiveDownstreamProjects()) {
 			if (tup!=this && (tup.isBuilding() || unblockedTasks.contains(tup)))
                 return tup;
         }
@@ -1098,10 +1111,10 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      * This means eventually there will be an automatic triggering of
      * the given project (provided that all builds went smoothly.)
      */
-    protected AbstractProject getBuildingUpstream() {
+    public AbstractProject getBuildingUpstream() {
         Set<Task> unblockedTasks = Jenkins.getInstance().getQueue().getUnblockedTasks();
 
-        for (AbstractProject tup : Jenkins.getInstance().getDependencyGraph().getTransitiveUpstream(this)) {
+        for (AbstractProject tup : getTransitiveUpstreamProjects()) {
 			if (tup!=this && (tup.isBuilding() || unblockedTasks.contains(tup)))
                 return tup;
         }
@@ -1180,7 +1193,11 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
         workspace.mkdirs();
         
         boolean r = scm.checkout(build, launcher, workspace, listener, changelogFile);
-        calcPollingBaseline(build, launcher, listener);
+        if (r) {
+            // Only calcRevisionsFromBuild if checkout was successful. Note that modern SCM implementations
+            // won't reach this line anyway, as they throw AbortExceptions on checkout failure.
+            calcPollingBaseline(build, launcher, listener);
+        }
         return r;
     }
 
@@ -1199,13 +1216,6 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
                 build.addAction(baseline);
         }
         pollingBaseline = baseline;
-    }
-
-    /**
-     * For reasons I don't understand, if I inline this method, AbstractMethodError escapes try/catch block.
-     */
-    private SCMRevisionState safeCalcRevisionsFromBuild(AbstractBuild build, Launcher launcher, TaskListener listener) throws IOException, InterruptedException {
-        return getScm()._calcRevisionsFromBuild(build, launcher, listener);
     }
 
     /**
@@ -1408,6 +1418,7 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
         }
     }
 
+    @SuppressWarnings("unchecked")
     public synchronized Map<TriggerDescriptor,Trigger> getTriggers() {
         return (Map)Descriptor.toMap(triggers);
     }
@@ -1578,7 +1589,7 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
             String causeText = req.getParameter("cause");
             cause = new RemoteCause(req.getRemoteAddr(), causeText);
         } else {
-            cause = new UserCause();
+            cause = new UserIdCause();
         }
         return new CauseAction(cause);
     }
@@ -1635,6 +1646,22 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
         rsp.forwardToPreviousPage(req);
     }
 
+    /**
+     * Deletes this project.
+     */
+    @Override
+    public void doDoDelete(StaplerRequest req, StaplerResponse rsp) throws IOException, ServletException, InterruptedException {
+        requirePOST();
+        delete();
+        if (req == null || rsp == null)
+            return;
+        View view = req.findAncestorObject(View.class);
+        if (view == null)
+            rsp.sendRedirect2(req.getContextPath() + '/' + getParent().getUrl());
+        else 
+            rsp.sendRedirect2(req.getContextPath() + '/' + view.getUrl());
+    }
+    
     @Override
     protected void submit(StaplerRequest req, StaplerResponse rsp) throws IOException, ServletException, FormException {
         super.submit(req,rsp);
@@ -1729,11 +1756,14 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      * Wipes out the workspace.
      */
     public HttpResponse doDoWipeOutWorkspace() throws IOException, ServletException, InterruptedException {
-        checkPermission(BUILD);
+        checkPermission(Functions.isWipeOutPermissionEnabled() ? WIPEOUT : BUILD);
         R b = getSomeBuildWithWorkspace();
         FilePath ws = b!=null ? b.getWorkspace() : null;
         if (ws!=null && getScm().processWorkspaceBeforeDeletion(this, ws, b.getBuiltOn())) {
             ws.deleteRecursive();
+            for (WorkspaceListener wl : WorkspaceListener.all()) {
+                wl.afterDelete(this);
+            }
             return new HttpRedirect(".");
         } else {
             // If we get here, that means the SCM blocked the workspace deletion.
@@ -1857,9 +1887,16 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
                 return FormValidation.error(e,
                         Messages.AbstractProject_AssignedLabelString_InvalidBooleanExpression(e.getMessage()));
             }
-            // TODO: if there's an atom in the expression that is empty, report it
-            if (Jenkins.getInstance().getLabel(value).isEmpty())
+            Label l = Jenkins.getInstance().getLabel(value);
+            if (l.isEmpty()) {
+                for (LabelAtom a : l.listAtoms()) {
+                    if (a.isEmpty()) {
+                        LabelAtom nearest = LabelAtom.findNearest(a.getName());
+                        return FormValidation.warning(Messages.AbstractProject_AssignedLabelString_NoMatch_DidYouMean(a.getName(),nearest.getDisplayName()));
+                    }
+                }
                 return FormValidation.warning(Messages.AbstractProject_AssignedLabelString_NoMatch());
+            }
             return FormValidation.ok();
         }
 
@@ -1904,14 +1941,13 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
          */
         static class AutoCompleteSeeder {
             private String source;
-            private Pattern quoteMatcher = Pattern.compile("(\\\"?)(.+?)(\\\"?+)(\\s*)");
 
             AutoCompleteSeeder(String source) {
                 this.source = source;
             }
 
             List<String> getSeeds() {
-                ArrayList<String> terms = new ArrayList();
+                ArrayList<String> terms = new ArrayList<String>();
                 boolean trailingQuote = source.endsWith("\"");
                 boolean leadingQuote = source.startsWith("\"");
                 boolean trailingSpace = source.endsWith(" ");
@@ -1945,13 +1981,22 @@ public abstract class AbstractProject<P extends AbstractProject<P,R>,R extends A
      * Finds a {@link AbstractProject} that has the name closest to the given name.
      */
     public static AbstractProject findNearest(String name) {
-        List<AbstractProject> projects = Jenkins.getInstance().getItems(AbstractProject.class);
+        return findNearest(name,Hudson.getInstance());
+    }
+
+    /**
+     * Finds a {@link AbstractProject} whose name (when referenced from the specified context) is closest to the given name.
+     *
+     * @since 1.419
+     */
+    public static AbstractProject findNearest(String name, ItemGroup context) {
+        List<AbstractProject> projects = Hudson.getInstance().getAllItems(AbstractProject.class);
         String[] names = new String[projects.size()];
         for( int i=0; i<projects.size(); i++ )
-            names[i] = projects.get(i).getName();
+            names[i] = projects.get(i).getRelativeNameFrom(context);
 
         String nearest = EditDistance.findNearest(name, names);
-        return (AbstractProject) Jenkins.getInstance().getItem(nearest);
+        return (AbstractProject)Jenkins.getInstance().getItem(nearest,context);
     }
 
     private static final Comparator<Integer> REVERSE_INTEGER_COMPARATOR = new Comparator<Integer>() {

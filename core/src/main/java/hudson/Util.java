@@ -23,81 +23,52 @@
  */
 package hudson;
 
+import com.sun.jna.Memory;
+import com.sun.jna.Native;
+import com.sun.jna.NativeLong;
+import hudson.Proc.LocalProc;
 import hudson.model.TaskListener;
-import jenkins.model.Jenkins;
-import static hudson.util.jna.GNUCLibrary.LIBC;
-
+import hudson.os.PosixAPI;
 import hudson.util.IOException2;
 import hudson.util.QuotedStringTokenizer;
 import hudson.util.VariableResolver;
-import hudson.Proc.LocalProc;
-import hudson.os.PosixAPI;
+import jenkins.model.Jenkins;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang.time.FastDateFormat;
 import org.apache.tools.ant.BuildException;
 import org.apache.tools.ant.Project;
-import org.apache.tools.ant.types.FileSet;
 import org.apache.tools.ant.taskdefs.Chmod;
 import org.apache.tools.ant.taskdefs.Copy;
-import org.apache.commons.lang.time.FastDateFormat;
-import org.apache.commons.io.IOUtils;
+import org.apache.tools.ant.types.FileSet;
 import org.jruby.ext.posix.FileStat;
 import org.jruby.ext.posix.POSIX;
+import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 import org.kohsuke.stapler.Stapler;
-import org.jvnet.animal_sniffer.IgnoreJRERequirement;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
-
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.OutputStreamWriter;
-import java.io.Reader;
-import java.io.StringReader;
-import java.io.Writer;
-import java.io.PrintStream;
-import java.io.InputStreamReader;
-import java.io.FileInputStream;
-import java.io.UnsupportedEncodingException;
+import java.io.*;
 import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
 import java.nio.charset.CharsetEncoder;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.NumberFormat;
 import java.text.ParseException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.MissingResourceException;
-import java.util.Properties;
-import java.util.ResourceBundle;
-import java.util.SimpleTimeZone;
-import java.util.StringTokenizer;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Set;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.nio.charset.Charset;
 
-import com.sun.jna.Native;
-import com.sun.jna.Memory;
-import com.sun.jna.NativeLong;
+import static hudson.util.jna.GNUCLibrary.LIBC;
 
 /**
  * Various utility methods that don't have more proper home.
@@ -200,11 +171,14 @@ public class Util {
         StringBuilder str = new StringBuilder((int)logfile.length());
 
         BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(logfile),charset));
-        char[] buf = new char[1024];
-        int len;
-        while((len=r.read(buf,0,buf.length))>0)
-           str.append(buf,0,len);
-        r.close();
+        try {
+            char[] buf = new char[1024];
+            int len;
+            while((len=r.read(buf,0,buf.length))>0)
+               str.append(buf,0,len);
+        } finally {
+            r.close();
+        }
 
         return str.toString();
     }
@@ -302,7 +276,16 @@ public class Util {
     public static void deleteRecursive(File dir) throws IOException {
         if(!isSymlink(dir))
             deleteContentsRecursive(dir);
-        deleteFile(dir);
+        try {
+            deleteFile(dir);
+        } catch (IOException e) {
+            // if some of the child directories are big, it might take long enough to delete that
+            // it allows others to create new files, causing problemsl ike JENKINS-10113
+            // so give it one more attempt before we give up.
+            if(!isSymlink(dir))
+                deleteContentsRecursive(dir);
+            deleteFile(dir);
+        }
     }
 
     /*
@@ -491,19 +474,13 @@ public class Util {
     }
 
     public static String nullify(String v) {
-        if(v!=null && v.length()==0)    v=null;
-        return v;
+        return fixEmpty(v);
     }
 
     public static String removeTrailingSlash(String s) {
         if(s.endsWith("/")) return s.substring(0,s.length()-1);
         else                return s;
     }
-
-    /**
-     * Write-only buffer.
-     */
-    private static final byte[] garbage = new byte[8192];
 
     /**
      * Computes MD5 digest of the given input stream.
@@ -517,9 +494,10 @@ public class Util {
         try {
             MessageDigest md5 = MessageDigest.getInstance("MD5");
 
+            byte[] buffer = new byte[1024];
             DigestInputStream in =new DigestInputStream(source,md5);
             try {
-                while(in.read(garbage)>0)
+                while(in.read(buffer)>0)
                     ; // simply discard the input
             } finally {
                 in.close();
@@ -699,7 +677,7 @@ public class Util {
             OutputStreamWriter w = new OutputStreamWriter(buf,"UTF-8");
 
             for (int i = 0; i < s.length(); i++) {
-                int c = (int) s.charAt(i);
+                int c = s.charAt(i);
                 if (c<128 && c!=' ') {
                     out.append((char) c);
                 } else {
@@ -1012,7 +990,7 @@ public class Util {
                 // ignore a failure.
                 new LocalProc(new String[]{"rm","-rf", symlinkPath},new String[0],listener.getLogger(), baseDir).join();
 
-            int r;
+            Integer r=null;
             if (!SYMLINK_ESCAPEHATCH) {
                 try {
                     r = LIBC.symlink(targetPath,symlinkFile.getAbsolutePath());
@@ -1023,13 +1001,18 @@ public class Util {
                 } catch (LinkageError e) {
                     // if JNA is unavailable, fall back.
                     // we still prefer to try JNA first as PosixAPI supports even smaller platforms.
-                    r = PosixAPI.get().symlink(targetPath,symlinkFile.getAbsolutePath());
+                    if (PosixAPI.supportsNative()) {
+                        r = PosixAPI.get().symlink(targetPath,symlinkFile.getAbsolutePath());
+                    }
                 }
-            } else // escape hatch, until we know that the above works well.
+            }
+            if (r==null) {
+                // if all else fail, fall back to the most expensive approach of forking a process
                 r = new LocalProc(new String[]{
                     "ln","-s", targetPath, symlinkPath},
                     new String[0],listener.getLogger(), baseDir).join();
-            if(r!=0)
+            }
+            if (r!=0)
                 listener.getLogger().println(String.format("ln -s %s %s failed: %d %s",targetPath, symlinkFile, r, errmsg));
         } catch (IOException e) {
             PrintStream log = listener.getLogger();

@@ -1,7 +1,8 @@
 /*
  * The MIT License
  * 
- * Copyright (c) 2004-2009, Sun Microsystems, Inc., Kohsuke Kawaguchi, Yahoo! Inc.
+ * Copyright (c) 2004-2011, Sun Microsystems, Inc., Kohsuke Kawaguchi, Yahoo! Inc.,
+ * Manufacture Francaise des Pneumatiques Michelin, Romain Seguy
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +24,8 @@
  */
 package hudson.model;
 
+import hudson.Functions;
+import hudson.security.PermissionScope;
 import org.kohsuke.stapler.StaplerRequest;
 
 import java.io.IOException;
@@ -71,7 +74,7 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
     /**
      * Gets all the jobs that this {@link Item} contains as descendants.
      */
-    abstract Collection<? extends Job> getAllJobs();
+    Collection<? extends Job> getAllJobs();
 
     /**
      * Gets the name of the item.
@@ -121,6 +124,22 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
      * of the ancestors.
      */
     String getFullDisplayName();
+
+    /**
+     * Gets the relative name to this item from the specified group.
+     *
+     * @since 1.419
+     * @return
+     *      String like "../foo/bar"
+     */
+    String getRelativeNameFrom(ItemGroup g);
+
+    /**
+     * Short for {@code getRelativeNameFrom(item.getParent())}
+     *
+     * @since 1.419
+     */
+    String getRelativeNameFrom(Item item);
 
     /**
      * Returns the URL of this item relative to the context root of the application.
@@ -193,19 +212,20 @@ public interface Item extends PersistenceRoot, SearchableModelObject, AccessCont
      * or {@link AbstractItem#getConfigFile()} to obtain the file
      * to save the data.
      */
-    public void save() throws IOException;
+    void save() throws IOException;
 
     /**
      * Deletes this item.
      */
-    public void delete() throws IOException, InterruptedException;
+    void delete() throws IOException, InterruptedException;
 
-    public static final PermissionGroup PERMISSIONS = new PermissionGroup(Item.class,Messages._Item_Permissions_Title());
-    public static final Permission CREATE = new Permission(PERMISSIONS, "Create", null, Permission.CREATE);
-    public static final Permission DELETE = new Permission(PERMISSIONS, "Delete", null, Permission.DELETE);
-    public static final Permission CONFIGURE = new Permission(PERMISSIONS, "Configure", null, Permission.CONFIGURE);
-    public static final Permission READ = new Permission(PERMISSIONS, "Read", null, Permission.READ);
-    public static final Permission EXTENDED_READ = new Permission(PERMISSIONS,"ExtendedRead", Messages._AbstractProject_ExtendedReadPermission_Description(), CONFIGURE, Boolean.getBoolean("hudson.security.ExtendedReadPermission"));
-    public static final Permission BUILD = new Permission(PERMISSIONS, "Build", Messages._AbstractProject_BuildPermission_Description(),  Permission.UPDATE);
-    public static final Permission WORKSPACE = new Permission(PERMISSIONS, "Workspace", Messages._AbstractProject_WorkspacePermission_Description(), Permission.READ);
+    PermissionGroup PERMISSIONS = new PermissionGroup(Item.class,Messages._Item_Permissions_Title());
+    Permission CREATE = new Permission(PERMISSIONS, "Create", null, Permission.CREATE, PermissionScope.ITEM_GROUP);
+    Permission DELETE = new Permission(PERMISSIONS, "Delete", null, Permission.DELETE, PermissionScope.ITEM);
+    Permission CONFIGURE = new Permission(PERMISSIONS, "Configure", null, Permission.CONFIGURE, PermissionScope.ITEM);
+    Permission READ = new Permission(PERMISSIONS, "Read", null, Permission.READ, PermissionScope.ITEM);
+    Permission EXTENDED_READ = new Permission(PERMISSIONS,"ExtendedRead", Messages._AbstractProject_ExtendedReadPermission_Description(), CONFIGURE, Boolean.getBoolean("hudson.security.ExtendedReadPermission"), new PermissionScope[]{PermissionScope.ITEM});
+    Permission BUILD = new Permission(PERMISSIONS, "Build", Messages._AbstractProject_BuildPermission_Description(),  Permission.UPDATE, PermissionScope.ITEM);
+    Permission WORKSPACE = new Permission(PERMISSIONS, "Workspace", Messages._AbstractProject_WorkspacePermission_Description(), Permission.READ, PermissionScope.ITEM);
+    Permission WIPEOUT = new Permission(PERMISSIONS, "WipeOut", Messages._AbstractProject_WipeOutPermission_Description(), null, Functions.isWipeOutPermissionEnabled(), new PermissionScope[]{PermissionScope.ITEM});
 }

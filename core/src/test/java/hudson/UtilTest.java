@@ -31,6 +31,10 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+
+import org.junit.Assume;
+import org.jvnet.hudson.test.Bug;
 
 import hudson.util.StreamTaskListener;
 
@@ -166,6 +170,46 @@ public class UtilTest extends TestCase {
                 System.err.println("log output: " + log);
 
             assertEquals(buf.toString(),Util.resolveSymlink(new File(d,"x"),l));
+            
+            
+            // test linking from another directory
+            File anotherDir = new File(d,"anotherDir");
+            assertTrue("Couldn't create "+anotherDir,anotherDir.mkdir());
+            
+            Util.createSymlink(d,"a","anotherDir/link",l);
+            assertEquals("a",Util.resolveSymlink(new File(d,"anotherDir/link"),l));
+            
+            // JENKINS-12331: either a bug in createSymlink or this isn't supposed to work: 
+            //assertTrue(Util.isSymlink(new File(d,"anotherDir/link")));
+        } finally {
+            Util.deleteRecursive(d);
+        }
+    }
+    
+    public void testIsSymlink() throws IOException, InterruptedException {
+        Assume.assumeTrue(!Functions.isWindows());
+        
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        StreamTaskListener l = new StreamTaskListener(baos);
+        File d = Util.createTempDir();
+        try {
+            new FilePath(new File(d, "original")).touch(0);
+            assertFalse(Util.isSymlink(new File(d, "original")));
+            Util.createSymlink(d,"original","link", l);
+            
+            assertTrue(Util.isSymlink(new File(d, "link")));
+            
+            // test linking to another directory
+            File dir = new File(d,"dir");
+            assertTrue("Couldn't create "+dir,dir.mkdir());
+            assertFalse(Util.isSymlink(new File(d,"dir")));
+            
+            File anotherDir = new File(d,"anotherDir");
+            assertTrue("Couldn't create "+anotherDir,anotherDir.mkdir());
+            
+            Util.createSymlink(d,"dir","anotherDir/symlinkDir",l);
+            // JENKINS-12331: either a bug in createSymlink or this isn't supposed to work:
+            // assertTrue(Util.isSymlink(new File(d,"anotherDir/symlinkDir")));
         } finally {
             Util.deleteRecursive(d);
         }
@@ -176,5 +220,56 @@ public class UtilTest extends TestCase {
         assertEquals("&lt;a>", Util.escape("<a>"));
         assertEquals("&quot;&#039;", Util.escape("'\""));
         assertEquals("&nbsp; ", Util.escape("  "));
+    }
+    
+    /**
+     * Compute 'known-correct' digests and see if I still get them when computed concurrently
+     * to another digest.
+     */
+    @Bug(10346)
+    public void testDigestThreadSafety() throws InterruptedException {
+    	String a = "abcdefgh";
+    	String b = "123456789";
+    	
+    	String digestA = Util.getDigestOf(a);
+    	String digestB = Util.getDigestOf(b);
+    	
+    	DigesterThread t1 = new DigesterThread(a, digestA);
+    	DigesterThread t2 = new DigesterThread(b, digestB);
+    	
+    	t1.start();
+    	t2.start();
+    	
+    	t1.join();
+    	t2.join();
+    	
+    	if (t1.error != null) {
+    		fail(t1.error);
+    	}
+    	if (t2.error != null) {
+    		fail(t2.error);
+    	}
+    }
+    
+    private static class DigesterThread extends Thread {
+    	private String string;
+		private String expectedDigest;
+		
+		private String error;
+
+		public DigesterThread(String string, String expectedDigest) {
+    		this.string = string;
+    		this.expectedDigest = expectedDigest;
+    	}
+		
+		public void run() {
+			for (int i=0; i < 1000; i++) {
+				String digest = Util.getDigestOf(this.string);
+				if (!this.expectedDigest.equals(digest)) {
+					this.error = "Expected " + this.expectedDigest + ", but got " + digest;
+					break;
+				}
+			}
+		}
     }
 }
